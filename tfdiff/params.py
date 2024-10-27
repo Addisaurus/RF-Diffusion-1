@@ -186,5 +186,60 @@ params_eeg = AttrDict(
     noise_schedule=np.linspace(5e-4, 0.1, 200).tolist(),
 )
 
+# ======================
+# ModRec Parameter Setting. 
+# ======================
+params_modrec = AttrDict(
+    task_id=4,  # New task ID for ModRec
+    
+    # Directory settings
+    log_dir='./log/modrec',
+    model_dir='./model/modrec/b32-256-200s',
+    data_dir=[
+        './dataset/modrec/data',     # Path to .tim files
+        './dataset/modrec/signal_record_first_20000.txt'  # Path to metadata
+    ],
+    out_dir='./dataset/modrec/output',
+    
+    # Training params
+    max_iter=None,  # Unlimited iterations
+    batch_size=32,
+    learning_rate=1e-3,
+    max_grad_norm=None,
+    
+    # Inference params
+    inference_batch_size=1,
+    robust_sampling=True,
+    
+    # Data params
+    sample_rate=32768,  # Original length of signals
+    input_dim=1,        # Single complex value per time step
+    extra_dim=[1],      # No additional dimensions
+    cond_dim=5,         # [mod_type, symbol_period, carrier_offset, excess_bw, snr]
+    
+    # Model params
+    embed_dim=256,
+    hidden_dim=256,
+    num_heads=8,
+    num_block=32,
+    dropout=0.,
+    mlp_ratio=4,
+    learn_tfdiff=False,
+    
+    # Diffusion params
+    signal_diffusion=True,
+    max_step=200,
+    # Blur schedule for frequency domain
+    blur_schedule=((0.1**2) * np.ones(200)).tolist(),
+    # Noise schedule for time domain
+    noise_schedule=np.linspace(1e-4, 0.05, 200).tolist(),
+)
 
-all_params = [params_wifi, params_fmcw, params_mimo, params_eeg]
+# Add to all_params list at bottom of file
+all_params = [
+    params_wifi, 
+    params_fmcw, 
+    params_mimo, 
+    params_eeg,
+    params_modrec  # Add the new params
+]
