@@ -1,5 +1,7 @@
 import numpy as np
-
+import yaml
+import os
+from pathlib import Path
 
 class AttrDict(dict):
     def __init__(self, *args, **kwargs):
@@ -16,230 +18,46 @@ class AttrDict(dict):
             raise NotImplementedError
         return self
 
-# ========================
-# Wifi Parameter Setting.
-# ========================
-params_wifi = AttrDict(
-    task_id=0,
-    log_dir='./log/wifi',
-    model_dir='./model/wifi/b32-256-100s',
-    data_dir=['./dataset/wifi/raw'],
-    out_dir='./dataset/wifi/output',
-    cond_dir=['./dataset/wifi/cond'],
-    fid_pred_dir = './dataset/wifi/img_matric/pred',
-    fid_data_dir = './dataset/wifi/img_matric/data',
-    # Training params
-    max_iter=None, # Unlimited number of iterations.
-    batch_size=32,
-    learning_rate=1e-3,
-    max_grad_norm=None,
-    # Inference params
-    inference_batch_size=1,
-    robust_sampling=True,
-    # Data params
-    sample_rate=512,
-    input_dim=90,
-    extra_dim=[90],
-    cond_dim=6,
-    # Model params
-    embed_dim=256,
-    hidden_dim=128,
-    num_heads=8,
-    num_block=32,
-    dropout=0.,
-    mlp_ratio=4,
-    learn_tfdiff=False,
-    # Diffusion params
-    signal_diffusion=True,
-    max_step=100,
-    # variance of the guassian blur applied on the spectrogram on each diffusion step [T]
-    blur_schedule=((1e-5**2) * np.ones(100)).tolist(),
-    # \beta_t, noise level added to the signal on each diffusion step [T]
-    noise_schedule=np.linspace(1e-4, 0.003, 100).tolist(),
-)
+def yaml_expr_constructor(loader, node):
+    """Constructor for handling !expr tags in YAML"""
+    value = loader.construct_scalar(node)
+    # Create a local namespace with numpy
+    namespace = {'np': np}
+    return eval(value, namespace)
 
-# ========================
-# FMCW Parameter Setting.
-# ========================
-params_fmcw = AttrDict(
-    task_id=1,
-    log_dir='./log/fmcw',
-    model_dir='./model/fmcw/b32-256-100s',
-    data_dir=['./dataset/fmcw/raw'],
-    out_dir='./dataset/fmcw/output',
-    cond_dir=['./dataset/fmcw/cond'],
-    fid_pred_dir = './dataset/fmcw/img_matric/pred',
-    fid_data_dir = './dataset/fmcw/img_matric/data',
-    # Training params
-    max_iter=None, # Unlimited number of iterations.
-    batch_size=32,
-    learning_rate=1e-3,
-    max_grad_norm=None,
-    # Inference params
-    inference_batch_size=1,
-    robust_sampling=True,
-    # Data params
-    sample_rate=512,
-    input_dim=128,
-    extra_dim=[128],
-    cond_dim=6,
-    # Model params
-    embed_dim=256,
-    hidden_dim=256,
-    num_heads=8,
-    num_block=32,
-    dropout=0.,
-    mlp_ratio=4,
-    learn_tfdiff=False,
-    # Diffusion params
-    signal_diffusion=True,
-    max_step=100,
-    # variance of the guassian blur applied on the spectrogram on each diffusion step [T]
-    blur_schedule=((1e-5**2) * np.ones(100)).tolist(),
-    # \beta_t, noise level added to the signal on each diffusion step [T]
-    noise_schedule=np.linspace(1e-4, 0.003, 100).tolist(),
-)
+# Register the custom constructor
+yaml.add_constructor('!expr', yaml_expr_constructor)
 
-# =======================
-# MIMO Parameter Setting.
-# =======================
-params_mimo = AttrDict(
-    task_id=2,
-    log_dir='./log/mimo',
-    model_dir='./model/mimo/b32-256-200s',
-    data_dir=['./dataset/mimo/raw'],
-    out_dir='./dataset/mimo/output',
-    cond_dir=['./dataset/mimo/cond'],
-    # Training params
-    max_iter=None, # Unlimited number of iterations.
-    # for inference use
-    batch_size = 8,
-    # batch_size=24,
-    learning_rate=1e-4,
-    max_grad_norm=None,
-    # Inference params
-    inference_batch_size=1,
-    robust_sampling=True,
-    # Data params
-    sample_rate=14,
-    # TransEmbedding
-    extra_dim=[26, 96],
-    cond_dim= [26, 96],
-    # Model params
-    embed_dim=256,
-    spatial_hidden_dim=128,
-    tf_hidden_dim=256,
-    num_heads=8,
-    num_spatial_block=16,
-    num_tf_block=16,
-    dropout=0.,
-    mlp_ratio=4,
-    learn_tfdiff=False,
-    # Diffusion params
-    signal_diffusion=True,
-    max_step=200,
-    # variance of the guassian blur applied on the spectrogram on each diffusion step [T]
-    blur_schedule=((0.1**2) * np.ones(200)).tolist(),
-    # \beta_t, noise level added to the signal on each diffusion step [T]
-    noise_schedule=np.linspace(5e-4, 0.1, 200).tolist(),
-)
+def load_config(name):
+    """Load config from YAML file"""
+    config_dir = Path(__file__).parent / 'config'
+    config_path = config_dir / f'{name}.yaml'
+    
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+    
+    return AttrDict(config)
 
+# Load all configurations
+params_wifi = load_config('wifi')
+params_fmcw = load_config('fmcw')
+params_mimo = load_config('mimo')
+params_eeg = load_config('eeg')
+params_modrec = load_config('modrec')
 
-# ======================
-# EEG Parameter Setting. 
-# ======================
-params_eeg = AttrDict(
-    task_id=3,
-    log_dir='./log/eeg',
-    model_dir='./model/eeg/b32-256-200s',
-    data_dir=['./dataset/eeg/raw'],
-    out_dir='./dataset/eeg/output',
-    cond_dir=['./dataset/eeg/cond'],
-    # Training params
-    max_iter=None, # Unlimited number of iterations.
-    # for inference use
-    batch_size = 8,
-    learning_rate=1e-4,
-    max_grad_norm=None,
-    # Inference params
-    inference_batch_size=1,
-    robust_sampling=True,
-    # Data params
-    sample_rate=512,
-    extra_dim=[1,1], 
-    cond_dim=512,   
-    # Model params
-    embed_dim=256,
-    hidden_dim=256,
-    input_dim=1,
-    num_block=16,
-    num_heads=8,
-    dropout=0.,
-    mlp_ratio=4,
-    learn_tfdiff=False,
-    # Diffusion params
-    signal_diffusion=True,
-    max_step=200,
-    # variance of the guassian blur applied on the spectrogram on each diffusion step [T]
-    blur_schedule=((0.1**2) * np.ones(200)).tolist(),
-    # \beta_t, noise level added to the signal on each diffusion step [T]
-    noise_schedule=np.linspace(5e-4, 0.1, 200).tolist(),
-)
-
-# ======================
-# ModRec Parameter Setting. 
-# ======================
-params_modrec = AttrDict(
-    task_id=4,  # New task ID for ModRec
-    
-    # Directory settings
-    log_dir='./log/modrec',
-    model_dir='./model/modrec/b32-256-200s',
-    data_dir=[
-        './dataset/modrec/data',     # Path to .tim files
-        './dataset/modrec/signal_record_first_20000.txt'  # Path to metadata
-    ],
-    out_dir='./dataset/modrec/output',
-    
-    # Training params
-    max_iter=None,  # Unlimited iterations
-    batch_size=32,
-    learning_rate=1e-3,
-    max_grad_norm=None,
-    
-    # Inference params
-    inference_batch_size=1,
-    robust_sampling=True,
-    
-    # Data params
-    sample_rate=32768,  # Original length of signals
-    input_dim=1,        # Single complex value per time step
-    extra_dim=[1],      # No additional dimensions
-    cond_dim=5,         # [mod_type, symbol_period, carrier_offset, excess_bw, snr]
-    
-    # Model params
-    embed_dim=256,
-    hidden_dim=256,
-    num_heads=8,
-    num_block=32,
-    dropout=0.,
-    mlp_ratio=4,
-    learn_tfdiff=False,
-    
-    # Diffusion params
-    signal_diffusion=True,
-    max_step=200,
-    # Blur schedule for frequency domain
-    blur_schedule=((0.1**2) * np.ones(200)).tolist(),
-    # Noise schedule for time domain
-    noise_schedule=np.linspace(1e-4, 0.05, 200).tolist(),
-)
-
-# Add to all_params list at bottom of file
+# Maintain the same interface
 all_params = [
-    params_wifi, 
-    params_fmcw, 
-    params_mimo, 
+    params_wifi,
+    params_fmcw,
+    params_mimo,
     params_eeg,
-    params_modrec  # Add the new params
+    params_modrec
 ]
+
+# Add CLI override capability
+def override_from_args(params, args):
+    """Override params with command line arguments"""
+    for key, value in vars(args).items():
+        if value is not None and hasattr(params, key):
+            setattr(params, key, value)
+    return params

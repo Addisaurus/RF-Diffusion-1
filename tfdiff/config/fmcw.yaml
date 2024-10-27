@@ -1,0 +1,41 @@
+task_id: 1
+log_dir: ./log/fmcw
+model_dir: ./model/fmcw/b32-256-100s
+data_dir: 
+  - ./dataset/fmcw/raw
+out_dir: ./dataset/fmcw/output
+cond_dir: 
+  - ./dataset/fmcw/cond
+fid_pred_dir: ./dataset/fmcw/img_matric/pred
+fid_data_dir: ./dataset/fmcw/img_matric/data
+
+# Training params
+max_iter: null
+batch_size: 32
+learning_rate: 1.0e-3
+max_grad_norm: null
+
+# Inference params
+inference_batch_size: 1
+robust_sampling: true
+
+# Data params
+sample_rate: 512
+input_dim: 128
+extra_dim: [128]
+cond_dim: 6
+
+# Model params
+embed_dim: 256
+hidden_dim: 256
+num_heads: 8
+num_block: 32
+dropout: 0.0
+mlp_ratio: 4
+learn_tfdiff: false
+
+# Diffusion params
+signal_diffusion: true
+max_step: 100
+blur_schedule: !expr ((1e-5**2) * np.ones(100)).tolist()
+noise_schedule: !expr np.linspace(1e-4, 0.003, 100).tolist()

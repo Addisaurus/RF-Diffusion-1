@@ -11,11 +11,12 @@ from matplotlib.font_manager import FontProperties
 from argparse import ArgumentParser
 import torch.nn as nn
 
-from tfdiff.params import AttrDict, all_params
+from tfdiff.params import load_config, override_from_args
 from tfdiff.wifi_model import tfdiff_WiFi
 from tfdiff.fmcw_model import tfdiff_fmcw
 from tfdiff.mimo_model import tfdiff_mimo
 from tfdiff.eeg_model import tfdiff_eeg
+from tfdiff.modrec_model import tfdiff_ModRec
 from tfdiff.diffusion import SignalDiffusion, GaussianDiffusion
 from tfdiff.dataset import from_path_inference, _nested_map
 
@@ -263,105 +264,117 @@ def print_fid(out_dir,data_dir,task_id):
     print('FID value:', fid_value)
 
 def main(args):
-    params = all_params[args.task_id]
-    model_dir = args.model_dir or params.model_dir
-    out_dir = args.out_dir or params.out_dir
-    if args.task_id in [0,1]:
-        fid_data_dir = params.fid_data_dir
-        fid_pred_dir = params.fid_pred_dir
-    if args.cond_dir is not None:
-        params.cond_dir = args.cond_dir
-    device = torch.device(
-        'cpu') if args.device == 'cpu' else torch.device('cuda')
-    # Lazy load model.
-    if os.path.exists(f'{model_dir}/weights.pt'):
-        checkpoint = torch.load(f'{model_dir}/weights.pt')
+    # Load configuration
+    config_names = ['wifi', 'fmcw', 'mimo', 'eeg', 'modrec']
+    params = load_config(config_names[args.task_id])
+    
+    # Override with custom config if provided
+    if args.config:
+        params = load_config(args.config)
+    
+    # Override with command line arguments
+    params = override_from_args(params, args)
+    
+    # Setup device
+    device = torch.device('cpu') if args.device == 'cpu' else torch.device('cuda')
+    
+    # Load model
+    if os.path.exists(f'{params.model_dir}/weights.pt'):
+        checkpoint = torch.load(f'{params.model_dir}/weights.pt')
     else:
-        checkpoint = torch.load(model_dir)
-    if args.task_id==0:
-        model = tfdiff_WiFi(AttrDict(params)).to(device)
-    elif args.task_id==1:
-        model = tfdiff_fmcw(AttrDict(params)).to(device)
-    elif args.task_id==2:
-        model = tfdiff_mimo(AttrDict(params)).to(device)
-    elif args.task_id==3:
-        model = tfdiff_eeg(AttrDict(params)).to(device)
+        checkpoint = torch.load(params.model_dir)
+        
+    # Initialize model based on task
+    if params.task_id == 0:
+        model = tfdiff_WiFi(params).to(device)
+    elif params.task_id == 1:
+        model = tfdiff_fmcw(params).to(device)
+    elif params.task_id == 2:
+        model = tfdiff_mimo(params).to(device)
+    elif params.task_id == 3:
+        model = tfdiff_eeg(params).to(device)
+    elif params.task_id == 4:
+        model = tfdiff_ModRec(params).to(device)
+    else:
+        raise ValueError(f"Unexpected task_id: {params.task_id}")
+    
     model.load_state_dict(checkpoint['model'])
     model.eval()
-    model.params.override(params)
-    # Initialize diffusion object.
-    diffusion = SignalDiffusion(
-        params) if params.signal_diffusion else GaussianDiffusion(params)
-    # Construct inference dataset.
+    
+    # Initialize diffusion
+    diffusion = SignalDiffusion(params) if params.diffusion.signal_diffusion else GaussianDiffusion(params)
+    
+    # Setup dataset
     dataset = from_path_inference(params)
-    # Sampling process.
+    
+    # Run inference
     with torch.no_grad():
         cur_batch = 0
         ssim_list = []
         snr_list = []
-      
+        
         for features in tqdm(dataset, desc=f'Epoch {cur_batch // len(dataset)}'):
-            features = _nested_map(features, lambda x: x.to(
-                device) if isinstance(x, torch.Tensor) else x)
+            features = _nested_map(features, lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
             data = features['data']
             cond = features['cond']
             
-            if args.task_id in [0, 1]:
-                # pred = diffusion.sampling(model, cond, device)
-                # pred = diffusion.robust_sampling(model, cond, device)
-                # pred = diffusion.fast_sampling(model, cond, device)
+            if params.task_id in [0, 1]:  # WiFi/FMCW
                 pred = diffusion.native_sampling(model, data, cond, device)
-                data_samples = [torch.view_as_complex(sample) for sample in torch.split(data, 1, dim=0)] # [B, [1, N, S]]
-                pred_samples = [torch.view_as_complex(sample) for sample in torch.split(pred, 1, dim=0)] # [B, [1, N, S]]
-                cond_samples = [torch.view_as_complex(sample) for sample in torch.split(cond, 1, dim=0)] # [B, [1, N, S]]
+                data_samples = [torch.view_as_complex(sample) for sample in torch.split(data, 1, dim=0)]
+                pred_samples = [torch.view_as_complex(sample) for sample in torch.split(pred, 1, dim=0)]
+                cond_samples = [torch.view_as_complex(sample) for sample in torch.split(cond, 1, dim=0)]
+                
                 for b, p_sample in enumerate(pred_samples):
                     d_sample = data_samples[b]
-                    cur_ssim = eval_ssim(p_sample, d_sample, params.sample_rate, params.input_dim, device=device)
-                    # Save the SSIM.
+                    cur_ssim = eval_ssim(p_sample, d_sample, params.data.sample_rate, params.data.input_dim, device=device)
                     ssim_list.append(cur_ssim.item())
                     
-                    if args.task_id:
-                        save_fmcw(out_dir, d_sample.cpu().detach(), p_sample.cpu().detach(), cond_samples[b].cpu().detach(), cur_batch,b)
+                    if params.task_id == 1:
+                        save_fmcw(params.out_dir, d_sample.cpu().detach(), p_sample.cpu().detach(), cond_samples[b].cpu().detach(), cur_batch, b)
                     else:
-                        save_wifi(out_dir, d_sample.cpu().detach(), p_sample.cpu().detach(), cond_samples[b].cpu().detach(), cur_batch,b)
-                cur_batch += 1
-            if args.task_id in [2, 3]:
-                # pred = diffusion.sampling(model, cond, device)
-                # pred = diffusion.robust_sampling(model, cond, device)
+                        save_wifi(params.out_dir, d_sample.cpu().detach(), p_sample.cpu().detach(), cond_samples[b].cpu().detach(), cur_batch, b)
+                
+            elif params.task_id in [2, 3]:  # MIMO/EEG
                 pred = diffusion.fast_sampling(model, cond, device)
-                # pred, _ = diffusion.native_sampling(model, data, cond, device)
-                if args.task_id == 3:
-                    pred = pred.squeeze(2)
-                    pred = pred.squeeze(2)
-                    data = data.squeeze(2)
-                    data = data.squeeze(2)
+                if params.task_id == 3:
+                    pred = pred.squeeze(2).squeeze(2)
+                    data = data.squeeze(2).squeeze(2)
                     pred = pred[:,:,0]
                     data = data[:,:,0]
-                    snr_list.append(cal_SNR_EEG(pred,data))
-                    save(out_dir, pred.cpu().detach(), cond.cpu().detach(), cur_batch)
+                    snr_list.append(cal_SNR_EEG(pred, data))
                 else:
-                    snr_list.append(cal_SNR_MIMO(pred,data))
-                    save_mimo(out_dir, data.cpu().detach(), pred.cpu().detach(), cond.cpu().detach(), cur_batch)
-                cur_batch += 1
-        if args.task_id in [0,1]:
-            print_fid(fid_pred_dir,fid_data_dir,args.task_id)
+                    snr_list.append(cal_SNR_MIMO(pred, data))
+                    save_mimo(params.out_dir, data.cpu().detach(), pred.cpu().detach(), cond.cpu().detach(), cur_batch)
+                    
+            elif params.task_id == 4:  # ModRec
+                pred = diffusion.native_sampling(model, data, cond, device)
+                # Add ModRec-specific evaluation and saving
+                
+            cur_batch += 1
+            
+        # Print results
+        if params.task_id in [0, 1]:
+            print_fid(params.fid_pred_dir, params.fid_data_dir, params.task_id)
             print(f'Average SSIM: {np.mean(ssim_list)}')
-        if args.task_id in [2, 3]:
-            print(f'Average SNR: {np.mean(snr_list)}.')
+        if params.task_id in [2, 3]:
+            print(f'Average SNR: {np.mean(snr_list)}')
 
-
+def add_inference_arguments(parser):
+    """Add inference-specific command line arguments"""
+    parser.add_argument('--task_id', type=int, required=True,
+                      help='Task ID (0:WiFi, 1:FMCW, 2:MIMO, 3:EEG, 4:ModRec)')
+    parser.add_argument('--config', type=str,
+                      help='Optional path to custom config YAML')
+    parser.add_argument('--model_dir', type=str,
+                      help='Override model directory')
+    parser.add_argument('--out_dir', type=str,
+                      help='Override output directory')
+    parser.add_argument('--cond_dir', type=str,
+                      help='Override condition directory')
+    parser.add_argument('--device', default='cuda',
+                      help='Device for inference (cuda/cpu)')
 
 if __name__ == '__main__':
-    parser = ArgumentParser(
-        description='runs inference (generation) process based on trained tfdiff model')
-    parser.add_argument('--task_id', type=int,
-                        help='use case of tfdiff model, 0/1/2/3 for WiFi/FMCW/MIMO/EEG respectively')
-    parser.add_argument('--model_dir', default=None,
-                        help='directory in which to store model checkpoints')
-    parser.add_argument('--out_dir', default=None,
-                        help='directories from which to store genrated data file')
-    parser.add_argument('--cond_dir', default=None,
-                        help='directories from which to read condition files for generation')
-    parser.add_argument('--device', default='cuda',
-                        help='device for data generation')
+    parser = ArgumentParser(description='Run inference using trained tfdiff model')
+    add_inference_arguments(parser)
     main(parser.parse_args())

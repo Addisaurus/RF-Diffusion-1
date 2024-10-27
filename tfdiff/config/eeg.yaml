@@ -1,0 +1,39 @@
+task_id: 3
+log_dir: ./log/eeg
+model_dir: ./model/eeg/b32-256-200s
+data_dir: 
+  - ./dataset/eeg/raw
+out_dir: ./dataset/eeg/output
+cond_dir: 
+  - ./dataset/eeg/cond
+
+# Training params
+max_iter: null
+batch_size: 8
+learning_rate: 1.0e-4
+max_grad_norm: null
+
+# Inference params
+inference_batch_size: 1
+robust_sampling: true
+
+# Data params
+sample_rate: 512
+extra_dim: [1, 1]
+cond_dim: 512
+input_dim: 1
+
+# Model params
+embed_dim: 256
+hidden_dim: 256
+num_heads: 8
+num_block: 16
+dropout: 0.0
+mlp_ratio: 4
+learn_tfdiff: false
+
+# Diffusion params
+signal_diffusion: true
+max_step: 200
+blur_schedule: !expr ((0.1**2) * np.ones(200)).tolist()
+noise_schedule: !expr np.linspace(5e-4, 0.1, 200).tolist()

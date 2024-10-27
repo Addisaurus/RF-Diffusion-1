@@ -1,0 +1,38 @@
+task_id: 4
+log_dir: ./log/modrec
+model_dir: ./model/modrec/b32-256-200s
+data_dir:
+  - ./dataset/modrec/data
+  - ./dataset/modrec/signal_record_first_20000.txt
+out_dir: ./dataset/modrec/output
+
+# Training params
+max_iter: null
+batch_size: 32
+learning_rate: 1.0e-3
+max_grad_norm: null
+
+# Inference params
+inference_batch_size: 1
+robust_sampling: true
+
+# Data params
+sample_rate: 32768
+input_dim: 1
+extra_dim: [1]
+cond_dim: 5  # [mod_type, symbol_period, carrier_offset, excess_bw, snr]
+
+# Model params
+embed_dim: 256
+hidden_dim: 256
+num_heads: 8
+num_block: 32
+dropout: 0.0
+mlp_ratio: 4
+learn_tfdiff: false
+
+# Diffusion params
+signal_diffusion: true
+max_step: 200
+blur_schedule: !expr ((0.1**2) * np.ones(200)).tolist()
+noise_schedule: !expr np.linspace(1e-4, 0.05, 200).tolist()
