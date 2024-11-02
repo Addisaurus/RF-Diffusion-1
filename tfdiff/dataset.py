@@ -9,15 +9,10 @@ from glob import glob
 from torch.utils.data.distributed import DistributedSampler
 import pandas as pd
 import struct
+import logging
+from .conditioning import ConditioningManager
 
-# data_key='csi_data',
-# gesture_key='gesture',
-# location_key='location',
-# orient_key='orient',
-# room_key='room',
-# rx_key='rx',
-# user_key='user',
-
+logger = logging.getLogger(__name__)
 
 def _nested_map(struct, map_fn):
     if isinstance(struct, tuple):
@@ -28,17 +23,21 @@ def _nested_map(struct, map_fn):
         return {k: _nested_map(v, map_fn) for k, v in struct.items()}
     return map_fn(struct)
 
-# New dataset class
 class ModRecDataset(torch.utils.data.Dataset):
-    """Dataset for CSPB.ML.2018R2 radio modulation signals.
-    Each sample contains I/Q samples and conditioning information including
-    modulation type, symbol period, carrier offset, etc."""
+    """Dataset for CSPB.ML.2018R2 radio modulation signals."""
     
-    def __init__(self, paths):
+    def __init__(self, paths, params):
         super().__init__()
         # Verify we have both data and metadata paths
+        if len(paths) != 2:
+            raise ValueError("ModRecDataset requires two paths: data directory and metadata file")
+        
         data_path = paths[0]  # Directory containing .tim files
-        metadata_file = paths[1]  # signal_record_first_20000.txt
+        metadata_file = paths[1]  # signal_record_C_2023.txt
+        
+        # Initialize conditioning manager
+        self.conditioning_manager = ConditioningManager(params)
+        logger.info(f"Initialized ModRecDataset with conditioning dim: {self.conditioning_manager.conditioning_dim}")
         
         # Load metadata
         self.metadata = pd.read_csv(
@@ -50,16 +49,12 @@ class ModRecDataset(torch.utils.data.Dataset):
             ]
         )
         
-        # Map modulations to indices
-        self.modulations = [
-            'bpsk', 'qpsk', '8psk', 'dqpsk', 
-            '16qam', '64qam', '256qam', 'msk'
-        ]
-        
         # Get all .tim files
         self.filenames = glob(f'{data_path}/**/signal_*.tim', recursive=True)
         if not self.filenames:
             raise RuntimeError(f"No .tim files found in {data_path}")
+        
+        logger.info(f"Found {len(self.filenames)} signal files")
 
     def __len__(self):
         return len(self.filenames)
@@ -69,7 +64,7 @@ class ModRecDataset(torch.utils.data.Dataset):
         filename = self.filenames[idx]
         signal_id = int(filename.split('_')[-1].split('.')[0])
         
-        # Get corresponding metadata
+        # Get metadata for this signal
         params = self.metadata[self.metadata['id'] == signal_id].iloc[0]
         
         # Read binary signal data
@@ -83,18 +78,24 @@ class ModRecDataset(torch.utils.data.Dataset):
         except Exception as e:
             raise IOError(f"Error reading {filename}: {e}")
 
-        # Create conditioning tensor
-        cond = torch.tensor([
-            self.modulations.index(params.modulation),
-            params.symbol_period,
-            params.carrier_offset,
-            params.excess_bw,
-            params.snr
-        ], dtype=torch.float32)
+        # Create metadata dictionary with renamed fields
+        metadata_dict = {
+            'mod_type': params.modulation,
+            'symbol_period': params.symbol_period,
+            'carrier_offset': params.carrier_offset,
+            'excess_bw': params.excess_bw,
+            'snr': params.snr
+        }
+        
+        # Create conditioning tensor using manager
+        cond = self.conditioning_manager.create_condition_vector(metadata_dict)
+        
+        # Add zero imaginary component to match RF-Diffusion expectations
+        cond = torch.stack([cond, torch.zeros_like(cond)], dim=-1)
 
         return {
             'data': torch.view_as_real(signal),  # [N, 2]
-            'cond': cond  # [5]
+            'cond': cond  # [cond_dim, 2]
         }
 
 class WiFiDataset(torch.utils.data.Dataset):
@@ -205,13 +206,10 @@ class Collator:
             # Stack batch
             data = torch.stack([record['data'] for record in minibatch])
             cond = torch.stack([record['cond'] for record in minibatch])
-            
-            # Convert condition to complex-like format by adding zero imaginary part
-            cond_complex = torch.stack([cond, torch.zeros_like(cond)], dim=-1)
-            
+                        
             return {
                 'data': data,  # [B, N, 2] 
-                'cond': cond_complex  # [B, 5, 2]
+                'cond': cond  # [B, cond_dim, 2]
             }
         ## WiFi Case
         elif task_id == 0:
@@ -301,7 +299,7 @@ def from_path(params, is_distributed=False):
     elif task_id == 3:
         dataset = EEGDataset(data_dir)
     elif task_id == 4:  # Add ModRec case
-        dataset = ModRecDataset(data_dir)
+        dataset = ModRecDataset(data_dir, params)
     else:
         raise ValueError("Unexpected task_id.")
     return torch.utils.data.DataLoader(

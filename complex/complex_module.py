@@ -7,8 +7,41 @@ import math
 
 
 def apply_complex(F_r, F_i, X):
-    X_r, X_i = [x.squeeze(dim=-1) for x in torch.split(X, 1, dim=-1)]
-    return torch.stack((F_r(X_r) - F_i(X_i), F_r(X_i) + F_i(X_r)), dim=-1)
+    """Apply complex linear transformation
+    
+    Args:
+        F_r (nn.Linear): Real component linear transformation
+        F_i (nn.Linear): Imaginary component linear transformation 
+        X (torch.Tensor): Input tensor of shape [..., 2] where last dim is [real, imag]
+    """
+    print("\n=== Complex Module Debug ===")
+    print(f"Input X shape: {X.shape}")
+    print(f"F_r input features: {F_r.in_features}, output features: {F_r.out_features}")
+    
+    # Split into real and imaginary components
+    split_tensors = torch.split(X, 1, dim=-1)
+    print(f"Number of split tensors: {len(split_tensors)}")
+    print(f"Split tensor shapes: {[t.shape for t in split_tensors]}")
+    
+    if len(split_tensors) != 2:
+        raise ValueError(f"Expected tensor with 2 components in last dimension, got {len(split_tensors)}")
+        
+    # Remove the extra dimension from split
+    X_r, X_i = [x.squeeze(dim=-1) for x in split_tensors]
+    print(f"X_r shape after squeeze: {X_r.shape}")
+    print(f"X_i shape after squeeze: {X_i.shape}")
+    
+    # Apply complex multiplication:
+    # (a + bi)(x + yi) = (ax - by) + (ay + bx)i
+    real_output = F_r(X_r) - F_i(X_i)
+    imag_output = F_r(X_i) + F_i(X_r)
+    
+    print(f"Output shape before stack: {real_output.shape}")
+    
+    # Stack back into complex form
+    result = torch.stack((real_output, imag_output), dim=-1)
+    print(f"Final output shape: {result.shape}")
+    return result
 
 def apply_complex_sep(F_r, F_i, X):
     X_r, X_i = [x.squeeze(dim=-1) for x in torch.split(X, 1, dim=-1)]

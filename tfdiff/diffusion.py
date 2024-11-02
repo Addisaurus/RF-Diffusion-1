@@ -25,25 +25,26 @@ class SignalDiffusion(nn.Module):
         print(f"Sample Rate: {params.sample_rate}")
         print(f"Extra Dimensions: {params.extra_dim}")
         print(f"Max Steps: {params.max_step}")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.params = params
         self.task_id = params.task_id
         self.input_dim = self.params.sample_rate # input time-series data length, N
         self.extra_dim = self.params.extra_dim # dimension of each data sample, e.g., [S A 2] for complex-valued CSI
         self.max_step = self.params.max_step # maximum diffusion steps
         beta = np.array(self.params.noise_schedule) # \beta, [T]
-        self.alpha = torch.tensor((1-beta).astype(np.float32)) # \alpha_t [T]
-        self.alpha_bar = torch.cumprod(self.alpha, dim=0) # \bar{\alpha_t}, [T]
-        self.var_blur = torch.tensor(np.array(self.params.blur_schedule).astype(np.float32)) # var of blur kernels on the frequency domain for each diffusion step
-        self.var_blur_bar = torch.cumsum(self.var_blur, dim=0) # var of blur kernels on the frequency domain, [T]
+        self.alpha = torch.tensor((1-beta).astype(np.float32)).to(device) # \alpha_t [T]
+        self.alpha_bar = torch.cumprod(self.alpha, dim=0).to(device) # \bar{\alpha_t}, [T]
+        self.var_blur = torch.tensor(np.array(self.params.blur_schedule).astype(np.float32)).to(device) # var of blur kernels on the frequency domain for each diffusion step
+        self.var_blur_bar = torch.cumsum(self.var_blur, dim=0).to(device) # var of blur kernels on the frequency domain, [T]
 
-        self.var_kernel = (self.input_dim / self.var_blur).unsqueeze(1) # var of each G_t, [T, 1]
-        self.var_kernel_bar = (self.input_dim / self.var_blur_bar).unsqueeze(1) # var of each \bar{G_t}, [T, 1]
-        self.gaussian_kernel = self.get_kernel(self.var_kernel) # G_t, [T, N]
-        self.gaussian_kernel_bar = self.get_kernel(self.var_kernel_bar) # \bar{G_t}, [T, N]
+        self.var_kernel = (self.input_dim / self.var_blur).unsqueeze(1).to(device) # var of each G_t, [T, 1]
+        self.var_kernel_bar = (self.input_dim / self.var_blur_bar).unsqueeze(1).to(device) # var of each \bar{G_t}, [T, 1]
+        self.gaussian_kernel = self.get_kernel(self.var_kernel).to(device) # G_t, [T, N]
+        self.gaussian_kernel_bar = self.get_kernel(self.var_kernel_bar).to(device) # \bar{G_t}, [T, N]
         # The weight of original information x_0 in degraded data x_t
-        self.info_weights = self.gaussian_kernel_bar * torch.sqrt(self.alpha_bar).unsqueeze(-1) # [T, N]
+        self.info_weights = self.gaussian_kernel_bar * torch.sqrt(self.alpha_bar).unsqueeze(-1).to(device) # [T, N]
         # The overall weight of gaussian noise \epsilon in degraded data x_t
-        self.noise_weights = self.get_noise_weights() # [T, N]
+        self.noise_weights = self.get_noise_weights().to(device) # [T, N]
 
         # Debug noise and blur schedules
         print("\n=== Diffusion Schedules ===")
@@ -51,7 +52,8 @@ class SignalDiffusion(nn.Module):
         print(f"Blur schedule range: {min(params.blur_schedule):.6f} to {max(params.blur_schedule):.6f}")
       
     def get_kernel(self, var_kernel):
-        samples = torch.arange(0, self.input_dim) # [N]
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        samples = torch.arange(0, self.input_dim).to(device) # [N]
         gaussian_kernel = torch.exp(-((samples - self.input_dim // 2)**2) / (2 * var_kernel)) / torch.sqrt(2 * torch.pi * var_kernel) # G_t, [T, N]
         gaussian_kernel = self.input_dim * gaussian_kernel / torch.sum(gaussian_kernel, dim=1, keepdim=True) # Normalized G_t, [T, N]
         return gaussian_kernel
@@ -119,8 +121,9 @@ class SignalDiffusion(nn.Module):
         
         # Get weights based on task type
         if task_id == 4:  # ModRec
-            noise_weight = self.noise_weights[t_cpu, :].unsqueeze(-1)
-            info_weight = self.info_weights[t_cpu, :].unsqueeze(-1)
+            # Move weights to the correct device before multiplication
+            noise_weight = self.noise_weights[t_cpu, :].unsqueeze(-1).to(device)
+            info_weight = self.info_weights[t_cpu, :].unsqueeze(-1).to(device)
             
             print(f"Noise weight shape: {noise_weight.shape}")
             print(f"Info weight shape: {info_weight.shape}")

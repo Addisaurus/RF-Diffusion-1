@@ -1,12 +1,8 @@
-import math
-from math import sqrt
-import numpy as np
 import torch
 from torch import nn
-from torch.nn import functional as F
-
 import complex.complex_module as cm
-
+from .conditioning import ConditioningManager
+import math
 
 def init_weight_norm(module):
     if isinstance(module, nn.Linear):
@@ -14,13 +10,11 @@ def init_weight_norm(module):
         if module.bias is not None:
             nn.init.constant_(module.bias, 0)
 
-
 def init_weight_zero(module):
     if isinstance(module, nn.Linear):
         nn.init.constant_(module.weight, 0)
         if module.bias is not None:
             nn.init.constant_(module.bias, 0)
-
 
 def init_weight_xavier(module):
     if isinstance(module, nn.Linear):
@@ -28,11 +22,9 @@ def init_weight_xavier(module):
         if module.bias is not None:
             nn.init.constant_(module.bias, 0)
 
-
 @torch.jit.script
 def modulate(x, shift, scale):
     return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
-
 
 class DiffusionEmbedding(nn.Module):
     def __init__(self, max_step, embed_dim=256, hidden_dim=256):
@@ -69,8 +61,6 @@ class DiffusionEmbedding(nn.Module):
         table = torch.view_as_real(torch.exp(1j * table))
         return table
 
-
-# TODO: Replace MLP with nn.Embedding
 class MLPConditionEmbedding(nn.Module):
     def __init__(self, cond_dim, hidden_dim=256):
         super().__init__()
@@ -86,35 +76,57 @@ class MLPConditionEmbedding(nn.Module):
     def forward(self, c):
         return self.projection(c)
 
-
 class PositionEmbedding(nn.Module):
     def __init__(self, max_len, input_dim, hidden_dim):
         super().__init__()
+        print(f"\n=== PositionEmbedding Init ===")
+        print(f"max_len: {max_len}, input_dim: {input_dim}, hidden_dim: {hidden_dim}")
         self.register_buffer('embedding', self._build_embedding(
             max_len, hidden_dim), persistent=False)
         self.projection = cm.ComplexLinear(input_dim, hidden_dim)
+        print(f"Embedding shape: {self.embedding.shape}")
         self.apply(init_weight_xavier)
 
     def forward(self, x): 
-        x = self.projection(x)
-        return cm.complex_mul(x, self.embedding.to(x.device))
+        print("\n=== PositionEmbedding Forward Pass ===")
+        print(f"Input x shape: {x.shape}")  # Should be [B, N, 2]
+        batch_size, seq_len, _ = x.shape
+        
+        # Reshape to [B*N, 1, 2] for the linear projection
+        x = x.reshape(-1, 1, 2)
+        print(f"Reshaped input shape: {x.shape}")
+        
+        # Apply projection
+        x = self.projection(x)  # Now [B*N, hidden_dim, 2]
+        print(f"After projection shape: {x.shape}")
+        
+        # Reshape back to [B, N, hidden_dim, 2]
+        x = x.reshape(batch_size, seq_len, -1, 2)
+        print(f"Reshaped back: {x.shape}")
+        
+        # Get embedding and ensure it's on the right device
+        embedding = self.embedding.to(x.device)  # [N, hidden_dim, 2]
+        print(f"Embedding shape: {embedding.shape}")
+        
+        # Multiply with positional embedding 
+        result = cm.complex_mul(x, embedding[:seq_len, :, :].unsqueeze(0))
+        print(f"Final output shape: {result.shape}")
+        return result
 
     def _build_embedding(self, max_len, hidden_dim):
         steps = torch.arange(max_len).unsqueeze(1)  # [P,1]
-        dims = torch.arange(hidden_dim).unsqueeze(0)          # [1,E]
-        table = steps * torch.exp(-math.log(max_len)
-                                  * dims / hidden_dim)     # [P,E]
-        table = torch.view_as_real(torch.exp(1j * table))
+        dims = torch.arange(hidden_dim).unsqueeze(0)  # [1,E]
+        table = steps * torch.exp(-math.log(max_len) * dims / hidden_dim)  # [P,E]
+        table = torch.view_as_real(torch.exp(1j * table))  # [P, E, 2]
         return table
 
-
 class DiA(nn.Module):
-    def __init__(self, hidden_dim, num_heads, dropout, mlp_ratio=4.0, **block_kwargs):
+    def __init__(self, hidden_dim, num_heads, dropout, mlp_ratio=4.0):
         super().__init__()
         self.norm1 = cm.NaiveComplexLayerNorm(
             hidden_dim, eps=1e-6, elementwise_affine=False)
         self.attn = cm.ComplexMultiHeadAttention(
-            hidden_dim, hidden_dim, num_heads, dropout, bias=True, **block_kwargs)
+            hidden_dim, hidden_dim, num_heads, dropout, bias=True)
         self.norm2 = cm.NaiveComplexLayerNorm(
             hidden_dim, eps=1e-6, elementwise_affine=False)
         mlp_hidden_dim = int(hidden_dim * mlp_ratio)
@@ -131,25 +143,13 @@ class DiA(nn.Module):
         self.adaLN_modulation.apply(init_weight_zero)
 
     def forward(self, x, c):
-        """
-        Embedding diffusion step t with adaptive layer-norm.
-        Embedding condition c with cross-attention.
-        - Input:\\
-          x, [B, N, H, 2], \\ 
-          t, [B, H, 2], \\
-          c, [B, N, H, 2], \\
-        """
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(
             c).chunk(6, dim=1)
         mod_x = modulate(self.norm1(x), shift_msa, scale_msa)
-        x = x + \
-            gate_msa.unsqueeze(
-                1) * self.attn(mod_x, mod_x, mod_x)
-        x = x + \
-            gate_mlp.unsqueeze(
-                1) * self.mlp(modulate(self.norm2(x), shift_mlp, scale_mlp))
+        x = x + gate_msa.unsqueeze(1) * self.attn(mod_x, mod_x, mod_x)
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(
+            modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
-
 
 class FinalLayer(nn.Module):
     def __init__(self, hidden_dim, out_dim):
@@ -169,167 +169,7 @@ class FinalLayer(nn.Module):
         x = self.linear(x)
         return x
 
-
-# class SpatialDiffusion(nn.Module):
-#     """
-#     Process each sample of a sequence.
-#     Take CSI diffusion as an example.
-#     - Input:\\
-#       x, [B, S, A, 2], \\
-#       t, [B], \\
-#       c, [B, C, 2], \\
-#     - Output:
-#       n, [B, S*A, 2]
-#     """
-
-#     def __init__(self, params):
-#         super().__init__()
-#         self.learn_tfdiff = params.learn_tfdiff
-#         self.num_block = params.num_spatial_block
-#         self.input_dim = params.extra_dim[-1]  # A
-#         self.input_len = params.extra_dim[-2]  # S
-#         self.output_dim = self.input_dim * self.input_len  # S*A
-#         self.hidden_dim = params.spatial_hidden_dim  # D
-#         self.num_heads = params.num_heads  # H
-#         self.max_step = params.max_step  # T
-#         self.embed_dim = params.embed_dim  # E
-#         self.cond_dim = params.cond_dim[-1]  # C
-#         self.dropout = params.dropout
-#         self.task_id = params.task_id
-#         self.mlp_ratio = params.mlp_ratio
-#         self.p_embed = PositionEmbedding(
-#             self.input_len, self.input_dim, self.hidden_dim)
-#         self.t_embed = DiffusionEmbedding(
-#             self.max_step, self.embed_dim, self.hidden_dim)
-#         self.c_embed = MLPConditionEmbedding(self.cond_dim, self.hidden_dim)
-#         # A series of concatenated DiA blocks.
-#         self.blocks = nn.ModuleList([
-#             DiA(self.hidden_dim, self.num_heads, self.dropout, self.mlp_ratio) for _ in range(self.num_block)
-#         ])
-#         self.adaMLP = nn.Sequential(
-#             # Flatten [B, S, A, 2] to [B, S*A, 2]
-#             nn.Flatten(start_dim=1, end_dim=-2),
-#             cm.ComplexLinear(self.input_len*self.hidden_dim, self.output_dim),
-#             cm.ComplexSiLU(),
-#             cm.ComplexLinear(self.output_dim, self.output_dim),
-#         )
-#         self.adaMLP.apply(init_weight_xavier)
-
-#     def forward(self, x, t, c):
-#         self.p_embed = self.p_embed.to(x.device)
-#         self.t_embed = self.t_embed.to(x.device)
-#         self.c_embed = self.c_embed.to(x.device)
-#         x = self.p_embed(x)
-#         t = self.t_embed(t)
-#         c = self.c_embed(c)
-#         for block in self.blocks:
-#             block = block.to(x.device)
-#             x = block(x, t, c)
-#         self.adaMLP = self.adaMLP.to(x.device)
-#         x = self.adaMLP(x)
-#         return x
-
-
-# class TimeFrequencyDiffusion(nn.Module):
-#     """
-#     Process the whole sequence.
-#     Take CSI diffusion as an example.
-#     - Input:\\
-#       x, [B, N, S*A, 2], \\
-#       t, [B], \\
-#       c, [B, N, C, 2], \\
-#     - Output:
-#       n, [B, N, S*A, 2]
-#     """
-
-#     def __init__(self, params):
-#         super().__init__()
-#         self.learn_tfdiff = params.learn_tfdiff
-#         self.num_block = params.num_tf_block
-#         self.batch_size = params.batch_size
-#         self.input_dim = np.prod(params.extra_dim)  # S*A
-#         self.input_len = params.sample_rate  # N
-#         self.output_dim = self.input_dim  # S*A
-#         self.hidden_dim = params.tf_hidden_dim  # D
-#         self.num_heads = params.num_heads  # H
-#         self.max_step = params.max_step  # T
-#         self.embed_dim = params.embed_dim  # E
-#         self.cond_dim = np.prod(params.cond_dim)  # C
-#         self.dropout = params.dropout
-#         self.task_id = params.task_id
-#         self.mlp_ratio = params.mlp_ratio
-#         self.p_embed = PositionEmbedding(
-#             self.input_len, self.input_dim, self.hidden_dim)
-#         self.t_embed = DiffusionEmbedding(
-#             self.max_step, self.embed_dim, self.hidden_dim)
-#         self.c_embed = MLPConditionEmbedding(self.cond_dim, self.hidden_dim)
-#         self.blocks = nn.ModuleList([
-#             DiA(self.hidden_dim, self.num_heads, self.dropout, self.mlp_ratio) for _ in range(self.num_block)
-#         ])
-#         self.final_layer = FinalLayer(
-#             self.hidden_dim, self.output_dim)
-
-#     def forward(self, x, t, c):
-#         x = self.p_embed(x)
-#         t = self.t_embed(t)
-#         if self.task_id == 0:
-#             c = c.reshape([self.batch_size, self.input_len, -1, 2])
-#         if self.task_id == 1:
-#             c = c.reshape([self.batch_size, self.input_len, -1, 2])
-#         c = self.c_embed(c)
-#         for block in self.blocks:
-#             x = block(x, t, c)
-#         x = self.final_layer(x, t)
-#         return x
-
-
-# class tfdiff_widar(nn.Module):
-#     """
-#     Signal Modulation and Augmentation via Generative Diffusion Model.
-#     Take CSI diffusion as an example.
-#     - Input:\\
-#       x, [B, N, S, A, 2], \\
-#       t, [B], \\
-#       c, [B, N, C, 2], \\
-#     - Output:
-#       n, [B, N, S, A, 2]
-#     """
-
-#     def __init__(self, params):
-#         super().__init__()
-#         self.params = params
-#         self.task_id = params.task_id
-#         self.sample_rate = params.sample_rate
-#         self.extra_dim = params.extra_dim
-#         self.cond_dim = params.cond_dim
-#         self.batch_size = params.batch_size
-#         self.spatial_dim = np.prod(self.extra_dim)
-#         # N parallel SpatialDiffusion blocks.
-#         self.spatial_block = SpatialDiffusion(self.params)
-#         self.tf_block = TimeFrequencyDiffusion(self.params)
-
-#     def forward(self, x, t, c):
-#         x_s = x.reshape([-1]+self.extra_dim+[2])  # [B*N, S, A, 2]
-#         x_s = self.spatial_block(x_s, t.repeat(self.sample_rate), c.repeat(self.sample_rate))
-#         x = x_s.reshape([-1, self.sample_rate]+[self.spatial_dim, 2])  # [B, N, S*A, 2]
-#         x = self.tf_block(x, t, c)  # [B, N, S*A, 2]
-#         x = x.reshape([-1, self.sample_rate]+self.extra_dim+[2])  # [B, N, S, A, 2]
-#         return x
-    
 class tfdiff_ModRec(nn.Module):
-    """
-    Signal Modulation Recognition Diffusion Model for CSPB.ML.2018R2 dataset.
-    
-    Input format:
-    - x: [B, N, 2] complex I/Q samples (real/imag interleaved)
-    - t: [B] diffusion timesteps
-    - c: [B, C] conditioning info including:
-         - modulation type (BPSK, QPSK, 8PSK, etc.)
-         - symbol period
-         - carrier offset
-         - excess bandwidth
-         - SNR
-    """
     def __init__(self, params):
         super().__init__()
         self.params = params
@@ -337,7 +177,10 @@ class tfdiff_ModRec(nn.Module):
         self.hidden_dim = params.hidden_dim
         self.num_heads = params.num_heads
         
-        # Basic position embedding for sequence of I/Q samples
+        # Initialize conditioning manager
+        self.conditioning_manager = ConditioningManager(params)
+        
+        # Position embedding for sequence of I/Q samples
         self.p_embed = PositionEmbedding(
             params.sample_rate,  # Sequence length
             params.input_dim,    # Input dimension (1 for complex samples)
@@ -351,9 +194,9 @@ class tfdiff_ModRec(nn.Module):
             params.hidden_dim
         )
             
-        # Condition embedding for modulation parameters
+        # Condition embedding with dynamic dimension
         self.c_embed = MLPConditionEmbedding(
-            params.cond_dim,     # Dimension of condition vector
+            self.conditioning_manager.conditioning_dim,  # Use dynamic conditioning dimension
             params.hidden_dim
         )
         
@@ -374,18 +217,7 @@ class tfdiff_ModRec(nn.Module):
         )
 
     def forward(self, x, t, c):
-        """
-        Forward pass of the model.
-        
-        Args:
-            x (Tensor): [B, N, 2] Input signal samples
-            t (Tensor): [B] Diffusion timesteps
-            c (Tensor): [B, C] Conditioning information
-            
-        Returns:
-            Tensor: [B, N, 2] Predicted signal samples
-        """
-        # Embed positions of sequence
+        # Embed positions
         x = self.p_embed(x)
         
         # Embed diffusion timestep

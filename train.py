@@ -7,10 +7,10 @@ from torch.multiprocessing import spawn
 from torch.nn.parallel import DistributedDataParallel
 from argparse import ArgumentParser
 
-from tfdiff.wifi_model import tfdiff_WiFi
-from tfdiff.mimo_model import tfdiff_mimo
-from tfdiff.eeg_model import tfdiff_eeg
-from tfdiff.fmcw_model import tfdiff_fmcw
+from tfdiff.other_models.wifi_model import tfdiff_WiFi
+from tfdiff.other_models.mimo_model import tfdiff_mimo
+from tfdiff.other_models.eeg_model import tfdiff_eeg
+from tfdiff.other_models.fmcw_model import tfdiff_fmcw
 from tfdiff.modrec_model import tfdiff_ModRec
 from tfdiff.learner import tfdiffLearner
 from tfdiff.dataset import from_path
@@ -117,16 +117,20 @@ def _train_impl(replica_id, model, dataset, params):
     opt = torch.optim.AdamW(model.parameters(), lr=params.learning_rate)
     learner = tfdiffLearner(params.log_dir, params.model_dir, model, dataset, opt, params)
     
-    # Log diagnostic plots to wandb if using it
-    if hasattr(learner, 'is_master') and learner.is_master:
-        import wandb
-        wandb.log({
-            "diffusion_schedules": wandb.Image("diffusion_schedules.png"),
-            "diffusion_progression": wandb.Image("diffusion_progression.png")
-        })
-    
     learner.is_master = (replica_id == 0)
     learner.restore_from_checkpoint()
+
+    # Log diagnostic plots to wandb if using it
+    if hasattr(learner, 'is_master') and learner.is_master:
+        try:
+            import wandb
+            wandb.log({
+                "diffusion_schedules": wandb.Image(os.path.join('diagnostics', 'diffusion_schedules.png')),
+                "diffusion_progression": wandb.Image(os.path.join('diagnostics', 'diffusion_progression.png'))
+            })
+        except Exception as e:
+            print(f"Warning: Failed to log diagnostic images to wandb: {e}")
+    
     learner.train(max_iter=params.max_iter)
 
 def train(params):

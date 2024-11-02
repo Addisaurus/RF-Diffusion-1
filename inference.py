@@ -12,10 +12,10 @@ from argparse import ArgumentParser
 import torch.nn as nn
 
 from tfdiff.params import load_config, override_from_args
-from tfdiff.wifi_model import tfdiff_WiFi
-from tfdiff.fmcw_model import tfdiff_fmcw
-from tfdiff.mimo_model import tfdiff_mimo
-from tfdiff.eeg_model import tfdiff_eeg
+from tfdiff.other_models.wifi_model import tfdiff_WiFi
+from tfdiff.other_models.fmcw_model import tfdiff_fmcw
+from tfdiff.other_models.mimo_model import tfdiff_mimo
+from tfdiff.other_models.eeg_model import tfdiff_eeg
 from tfdiff.modrec_model import tfdiff_ModRec
 from tfdiff.diffusion import SignalDiffusion, GaussianDiffusion
 from tfdiff.dataset import from_path_inference, _nested_map
@@ -66,8 +66,9 @@ def cal_SNR_EEG(predict, truth):
         truth = truth.detach().cpu().numpy()
     PS = np.sum(np.square(truth), axis=-1)  # power of signal
     PN = np.sum(np.square((predict - truth)), axis=-1)  # power of noise
-    ratio = PS / PN
-    return 10 * np.log10(ratio)
+    # Added small epsilon to avoid division by zero
+    ratio = PS / (PN + 1e-10)
+    return 10 * np.log10(ratio + 1e-10)
 
 def cal_SNR_MIMO(predict, truth):
     if torch.is_tensor(predict):

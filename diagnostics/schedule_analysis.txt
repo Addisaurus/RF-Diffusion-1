@@ -1,0 +1,5 @@
+Step 0: SNR = 2.04 dB
+Step 50: SNR = -25.59 dB
+Step 100: SNR = -34.59 dB
+Step 150: SNR = -37.59 dB
+Step 199: SNR = -38.09 dB
