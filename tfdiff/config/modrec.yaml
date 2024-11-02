@@ -2,8 +2,8 @@ task_id: 4
 log_dir: ./log/modrec
 model_dir: ./model/modrec/b32-256-200s
 data_dir:
-  - ./dataset/modrec/data
-  - ./dataset/modrec/signal_record_first_20000.txt
+  - C:\Users\acnut\Coding\csp_dataset
+  - C:\Users\acnut\Coding\csp_dataset\signal_record_C_2023.txt
 out_dir: ./dataset/modrec/output
 
 # Training params
@@ -34,5 +34,7 @@ learn_tfdiff: false
 # Diffusion params
 signal_diffusion: true
 max_step: 200
-blur_schedule: !expr ((0.1**2) * np.ones(200)).tolist()
+# Gradually increasing blur schedule
+blur_schedule: !expr np.linspace(0.001, 0.1, 200).tolist()
+# Linear noise schedule
 noise_schedule: !expr np.linspace(1e-4, 0.05, 200).tolist()

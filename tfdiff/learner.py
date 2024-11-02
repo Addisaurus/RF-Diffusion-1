@@ -2,7 +2,7 @@ import numpy as np
 import os
 import torch
 import torch.nn as nn
-from torch.utils.tensorboard import SummaryWriter
+import wandb
 from tqdm import tqdm
 from tfdiff.diffusion import SignalDiffusion, GaussianDiffusion
 from tfdiff.dataset import _nested_map
@@ -36,24 +36,36 @@ class tfdiffLearner:
         self.model = model
         self.dataset = dataset
         self.optimizer = optimizer
-        self.device = model.device
+        self.device = next(model.parameters()).device if list(model.parameters()) else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.diffusion = SignalDiffusion(params) if params.signal_diffusion else GaussianDiffusion(params)
-        # self.prof = torch.profiler.profile(
-        #     schedule=torch.profiler.schedule(skip_first=1, wait=0, warmup=2, active=1, repeat=1),
-        #     on_trace_ready=torch.profiler.tensorboard_trace_handler(self.log_dir),
-        #     with_modules=True, with_flops=True
-        # )
-        # eeg
-        # self.lr_scheduler = torch.optim.lr_scheduler.StepLR(
-        #     self.optimizer, 5, gamma=0.5)
-        # mimo
         self.lr_scheduler = torch.optim.lr_scheduler.StepLR(
             self.optimizer, 1, gamma=0.5)
         self.params = params
         self.iter = 0
         self.is_master = True
         self.loss_fn = nn.MSELoss()
-        self.summary_writer = None
+
+        # Initialize wandb only on master process
+        if self.is_master:
+            wandb.init(
+                project="RF-Diffusion",
+                config={
+                    "task_id": params.task_id,
+                    "batch_size": params.batch_size,
+                    "learning_rate": params.learning_rate,
+                    "model_type": type(model).__name__,
+                    "max_step": params.max_step,
+                    "sample_rate": params.sample_rate,
+                    "hidden_dim": params.hidden_dim,
+                    "num_heads": params.num_heads,
+                    "num_block": params.num_block,
+                    "dropout": params.dropout,
+                    "signal_diffusion": params.signal_diffusion,
+                },
+                name=f"task_{params.task_id}_{type(model).__name__}"
+            )
+            # Log model architecture
+            wandb.watch(model, log="all", log_freq=100)
 
     def state_dict(self):
         if hasattr(self.model, 'module') and isinstance(self.model.module, nn.Module):
@@ -80,6 +92,17 @@ class tfdiffLearner:
         save_name = f'{self.model_dir}/{save_basename}'
         link_name = f'{self.model_dir}/{filename}.pt'
         torch.save(self.state_dict(), save_name)
+        
+        # Log model checkpoint as artifact
+        if self.is_master:
+            artifact = wandb.Artifact(
+                name=f"model-checkpoint-{self.iter}", 
+                type="model",
+                description=f"Model checkpoint at iteration {self.iter}"
+            )
+            artifact.add_file(save_name)
+            wandb.log_artifact(artifact)
+            
         if os.name == 'nt':
             torch.save(self.state_dict(), link_name)
         else:
@@ -96,12 +119,12 @@ class tfdiffLearner:
             return False
 
     def train(self, max_iter=None):
-        device = next(self.model.parameters()).device
-        # self.prof.start()
+        device = self.device
         while True:  # epoch
             for features in tqdm(self.dataset, desc=f'Epoch {self.iter // len(self.dataset)}') if self.is_master else self.dataset:
                 if max_iter is not None and self.iter >= max_iter:
-                    # self.prof.stop()
+                    if self.is_master:
+                        wandb.finish()
                     return
                 features = _nested_map(features, lambda x: x.to(
                     device) if isinstance(x, torch.Tensor) else x)
@@ -114,19 +137,18 @@ class tfdiffLearner:
                         self._write_summary(self.iter, features, loss)
                     if self.iter % (len(self.dataset)) == 0:
                         self.save_to_checkpoint()
-                # self.prof.step()
                 self.iter += 1
             self.lr_scheduler.step()
 
     def train_iter(self, features):
         self.optimizer.zero_grad()
-        data = features['data']  # orignial data, x_0, [B, N, S*A, 2]
+        data = features['data']  # original data, x_0, [B, N, S*A, 2]
         cond = features['cond']  # cond, c, [B, C]
         B = data.shape[0]
         # random diffusion step, [B]
-        t = torch.randint(0, self.diffusion.max_step, [B], dtype=torch.int64)
+        t = torch.randint(0, self.diffusion.max_step, [B], dtype=torch.int64, device=self.device)
         degrade_data = self.diffusion.degrade_fn(
-            data, t ,self.task_id)  # degrade data, x_t, [B, N, S*A, 2]
+            data, t, self.task_id)  # degrade data, x_t, [B, N, S*A, 2]
         predicted = self.model(degrade_data, t, cond)
         if self.task_id==3:
             data = data.reshape(-1,512,1,2)
@@ -138,10 +160,17 @@ class tfdiffLearner:
         return loss
 
     def _write_summary(self, iter, features, loss):
-        writer = self.summary_writer or SummaryWriter(self.log_dir, purge_step=iter)
-        # writer.add_scalars('feature/csi', features['csi'][0].abs(), step)
-        # writer.add_image('feature/stft', features['stft'][0].abs(), step)
-        writer.add_scalar('train/loss', loss, iter)
-        writer.add_scalar('train/grad_norm', self.grad_norm, iter)
-        writer.flush()
-        self.summary_writer = writer
+        if not self.is_master:
+            return
+            
+        metrics = {
+            "train/loss": loss.item(),
+            "train/grad_norm": self.grad_norm,
+            "train/learning_rate": self.optimizer.param_groups[0]['lr'],
+            "train/epoch": iter // len(self.dataset),
+            "system/gpu_utilization": torch.cuda.utilization() if torch.cuda.is_available() else 0,
+            "system/gpu_memory_allocated": torch.cuda.memory_allocated(self.device) / 1024**3 if torch.cuda.is_available() else 0,  # Convert to GB
+            "system/gpu_memory_reserved": torch.cuda.memory_reserved(self.device) / 1024**3 if torch.cuda.is_available() else 0,
+        }
+        
+        wandb.log(metrics, step=iter)

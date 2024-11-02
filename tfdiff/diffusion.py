@@ -3,9 +3,28 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+def print_tensor_info(tensor, name, batch_idx=0):
+    """Print detailed tensor information including shape, type, and sample values"""
+    print(f"\n=== {name} ===")
+    print(f"Shape: {tensor.shape}")
+    print(f"Type: {tensor.dtype}")
+    print(f"Device: {tensor.device}")
+    print(f"Min/Max: {tensor.min():.4f} / {tensor.max():.4f}")
+    print(f"Mean/Std: {tensor.mean():.4f} / {tensor.std():.4f}")
+    if len(tensor.shape) > 1:
+        print(f"Sample from batch {batch_idx}:")
+        sample = tensor[batch_idx] if tensor.shape[0] > batch_idx else tensor[0]
+        print(sample[:5])  # First 5 elements
+    print("=" * 50)
+
 class SignalDiffusion(nn.Module):
     def __init__(self, params):
         super().__init__()
+        print("\n=== Initializing SignalDiffusion ===")
+        print(f"Task ID: {params.task_id}")
+        print(f"Sample Rate: {params.sample_rate}")
+        print(f"Extra Dimensions: {params.extra_dim}")
+        print(f"Max Steps: {params.max_step}")
         self.params = params
         self.task_id = params.task_id
         self.input_dim = self.params.sample_rate # input time-series data length, N
@@ -16,6 +35,7 @@ class SignalDiffusion(nn.Module):
         self.alpha_bar = torch.cumprod(self.alpha, dim=0) # \bar{\alpha_t}, [T]
         self.var_blur = torch.tensor(np.array(self.params.blur_schedule).astype(np.float32)) # var of blur kernels on the frequency domain for each diffusion step
         self.var_blur_bar = torch.cumsum(self.var_blur, dim=0) # var of blur kernels on the frequency domain, [T]
+
         self.var_kernel = (self.input_dim / self.var_blur).unsqueeze(1) # var of each G_t, [T, 1]
         self.var_kernel_bar = (self.input_dim / self.var_blur_bar).unsqueeze(1) # var of each \bar{G_t}, [T, 1]
         self.gaussian_kernel = self.get_kernel(self.var_kernel) # G_t, [T, N]
@@ -24,6 +44,11 @@ class SignalDiffusion(nn.Module):
         self.info_weights = self.gaussian_kernel_bar * torch.sqrt(self.alpha_bar).unsqueeze(-1) # [T, N]
         # The overall weight of gaussian noise \epsilon in degraded data x_t
         self.noise_weights = self.get_noise_weights() # [T, N]
+
+        # Debug noise and blur schedules
+        print("\n=== Diffusion Schedules ===")
+        print(f"Noise schedule range: {min(params.noise_schedule):.6f} to {max(params.noise_schedule):.6f}")
+        print(f"Blur schedule range: {min(params.blur_schedule):.6f} to {max(params.blur_schedule):.6f}")
       
     def get_kernel(self, var_kernel):
         samples = torch.arange(0, self.input_dim) # [N]
@@ -80,42 +105,59 @@ class SignalDiffusion(nn.Module):
         return torch.stack(noise_weights, dim=0) # [T, N] 
 
     def degrade_fn(self, x_0, t, task_id):
+        """Add noise to the input signal based on the task type"""
         device = x_0.device
-        if task_id in [0, 1]:
-            noise_weight = self.noise_weights[t, :].unsqueeze(-1).unsqueeze(-1).to(device) # equivalent gaussian noise weights, [B, N, 1, 1, 1]
-            info_weight = self.info_weights[t, :].unsqueeze(-1).unsqueeze(-1).to(device) # equivalent original info weights, [B, N, 1, 1, 1]
-        if task_id in [2, 3]:
-            noise_weight = self.noise_weights[t, :].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(device) # equivalent gaussian noise weights, [B, N, 1, 1, 1]
-            info_weight = self.info_weights[t, :].unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(device) # equivalent original info weights, [B, N, 1, 1, 1]
-        # random seed
-        torch.manual_seed(11)
-        noise =  noise_weight * torch.randn_like(x_0, dtype=torch.float32, device=device) # [B, N, S, A, 2]
-        x_t = info_weight * x_0 + noise # [B, N, S, A, 2]
+        
+        print("\n=== Starting degrade_fn ===")
+        print(f"Input signal shape: {x_0.shape}")
+        print(f"Input signal device: {device}")
+        print(f"Timestep t: {t}")
+        print(f"Timestep device: {t.device}")
+        
+        # Convert t to CPU for indexing
+        t_cpu = t.cpu()
+        
+        # Get weights based on task type
+        if task_id == 4:  # ModRec
+            noise_weight = self.noise_weights[t_cpu, :].unsqueeze(-1)
+            info_weight = self.info_weights[t_cpu, :].unsqueeze(-1)
+            
+            print(f"Noise weight shape: {noise_weight.shape}")
+            print(f"Info weight shape: {info_weight.shape}")
+        
+        # Generate and apply noise
+        noise = noise_weight * torch.randn_like(x_0, dtype=torch.float32, device=device)
+        x_t = info_weight * x_0 + noise
+        
+        print(f"Output shape: {x_t.shape}")
         return x_t
 
 
     def sampling(self, restore_fn, cond, device):
-        batch_size = cond.shape[0] # B
+        """Generate new samples"""
+        batch_size = cond.shape[0]
         batch_max = (self.max_step-1)*torch.ones(batch_size, dtype=torch.int64)
-        # Add batch dimension.
-        # cond = torch.view_as_real(torch.from_numpy(cond['cond']).to(torch.complex64)).unsqueeze(0)
-        # cond = cond.unsqueeze(0)
-        # Construct a mini-batch.
-        # cond = cond.repeat((batch_size, 1, 1, 1, 1))
-        # Generate degraded noise.
+        
+        # Generate initial noise
         data_dim = [batch_size, self.input_dim] + self.extra_dim + [2]
-        noise = torch.randn(data_dim, dtype=torch.float32, device=device) # [B, N, S, A, 2]
-        if self.task_id in [2,3]:
-            inf_weight = (self.noise_weights[batch_max, :] + self.info_weights[batch_max, :]).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(device) # [B, N, 1, 1, 1]
+        noise = torch.randn(data_dim, dtype=torch.float32, device=device)
+        
+        # Apply weights based on task type
+        if self.task_id in [2, 3]:
+            inf_weight = (self.noise_weights[batch_max, :] + self.info_weights[batch_max, :]).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).to(device)
+        elif self.task_id == 4:
+            inf_weight = (self.noise_weights[batch_max, :] + self.info_weights[batch_max, :]).unsqueeze(-1).to(device)
         else:
-            inf_weight = (self.noise_weights[batch_max, :] + self.info_weights[batch_max, :]).unsqueeze(-1).unsqueeze(-1).to(device) # [B, N, 1, 1, 1]
-        x_s = inf_weight * noise # [B, N, S, A, 2]
-        # Restore data from noise.
-        for s in range(self.max_step-1, -1, -1): # reverse from t to 0
-            x_0_hat = restore_fn(x_s, s*torch.ones(batch_size, dtype=torch.int64), cond) # resotre \hat{x_0} from x_s using trained tfdiff model
+            inf_weight = (self.noise_weights[batch_max, :] + self.info_weights[batch_max, :]).unsqueeze(-1).unsqueeze(-1).to(device)
+        
+        x_s = inf_weight * noise
+        
+        # Iteratively denoise
+        for s in range(self.max_step-1, -1, -1):
+            x_0_hat = restore_fn(x_s, s*torch.ones(batch_size, dtype=torch.int64), cond)
             if s > 0:
-                # x_{s-1} = D(\hat{x_0}, s-1)
-                x_s = self.degrade_fn(x_0_hat, t=(s-1)*torch.ones(batch_size, dtype=torch.int64), task_id = self.task_id) # degrade \hat{x_0} to x_{s-1}
+                x_s = self.degrade_fn(x_0_hat, t=(s-1)*torch.ones(batch_size, dtype=torch.int64), task_id=self.task_id)
+                
         return x_0_hat
     
     def robust_sampling(self, restore_fn, cond, device):
@@ -164,7 +206,6 @@ class SignalDiffusion(nn.Module):
         # Restore data from noise.
         x_0_hat = restore_fn(x_s, batch_max, cond)
         return x_0_hat
-
 
 class GaussianDiffusion(nn.Module):
     def __init__(self, params):

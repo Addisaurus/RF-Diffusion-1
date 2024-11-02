@@ -18,15 +18,19 @@ class AttrDict(dict):
             raise NotImplementedError
         return self
 
-def yaml_expr_constructor(loader, node):
+def expr_constructor(loader, node):
     """Constructor for handling !expr tags in YAML"""
     value = loader.construct_scalar(node)
     # Create a local namespace with numpy
     namespace = {'np': np}
     return eval(value, namespace)
 
-# Register the custom constructor
-yaml.add_constructor('!expr', yaml_expr_constructor)
+# Create a custom YAML loader class
+class ExprLoader(yaml.SafeLoader):
+    pass
+
+# Register the custom constructor with our loader
+ExprLoader.add_constructor('!expr', expr_constructor)
 
 def load_config(name):
     """Load config from YAML file"""
@@ -34,7 +38,8 @@ def load_config(name):
     config_path = config_dir / f'{name}.yaml'
     
     with open(config_path) as f:
-        config = yaml.safe_load(f)
+        # Use our custom loader instead of safe_load
+        config = yaml.load(f, Loader=ExprLoader)
     
     return AttrDict(config)
 

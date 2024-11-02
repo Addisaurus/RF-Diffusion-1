@@ -206,9 +206,12 @@ class Collator:
             data = torch.stack([record['data'] for record in minibatch])
             cond = torch.stack([record['cond'] for record in minibatch])
             
+            # Convert condition to complex-like format by adding zero imaginary part
+            cond_complex = torch.stack([cond, torch.zeros_like(cond)], dim=-1)
+            
             return {
                 'data': data,  # [B, N, 2] 
-                'cond': torch.view_as_real(cond)  # [B, 5, 2]
+                'cond': cond_complex  # [B, 5, 2]
             }
         ## WiFi Case
         elif task_id == 0:
