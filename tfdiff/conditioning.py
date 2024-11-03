@@ -32,7 +32,22 @@ class ConditioningManager:
             config: Configuration object containing conditioning settings
         """
         self.enabled_fields = self._get_config_value(config, 'enabled_fields', ['mod_type'])
-        self.field_configs = self._get_config_value(config, 'field_configs', {})
+        raw_field_configs = self._get_config_value(config, 'field_configs', {})
+        
+        # Convert AttrDict configs to FieldConfig instances
+        self.field_configs = {}
+        for field, field_config in raw_field_configs.items():
+            # Only convert configs for enabled fields
+            if field in self.enabled_fields:
+                self.field_configs[field] = FieldConfig(
+                    type=field_config.get('type'),
+                    values=field_config.get('values'),
+                    normalize=field_config.get('normalize', False),
+                    required=field_config.get('required', True),
+                    min_value=field_config.get('min_value'),
+                    max_value=field_config.get('max_value')
+                )
+        
         self._validate_configuration()
         self.conditioning_dim = self._calculate_conditioning_dim()
         
@@ -81,6 +96,10 @@ class ConditioningManager:
 
     def _validate_configuration(self):
         """Validate conditioning configuration"""
+        # print("\n=== Validating Configuration ===")
+        # print(f"Enabled fields: {self.enabled_fields}")
+        # print(f"Field configs: {self.field_configs}")
+
         # Ensure mod_type is enabled
         if 'mod_type' not in self.enabled_fields:
             raise ValueError("mod_type must be in enabled_fields")

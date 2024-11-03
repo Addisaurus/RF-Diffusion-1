@@ -11,9 +11,9 @@ def track_memory():
         start_allocated = torch.cuda.memory_allocated()
         start_reserved = torch.cuda.memory_reserved()
         
-        print(f"\n=== Memory tracking start ===")
-        print(f"Allocated: {start_allocated/1024**3:.2f} GB")
-        print(f"Reserved:  {start_reserved/1024**3:.2f} GB")
+        # print(f"\n=== Memory tracking start ===")
+        # print(f"Allocated: {start_allocated/1024**3:.2f} GB")
+        # print(f"Reserved:  {start_reserved/1024**3:.2f} GB")
         
         try:
             yield
@@ -22,11 +22,11 @@ def track_memory():
             end_allocated = torch.cuda.memory_allocated()
             end_reserved = torch.cuda.memory_reserved()
             
-            print(f"\n=== Memory tracking end ===")
-            print(f"Allocated: {end_allocated/1024**3:.2f} GB")
-            print(f"Reserved:  {end_reserved/1024**3:.2f} GB")
-            print(f"Difference allocated: {(end_allocated-start_allocated)/1024**3:.2f} GB")
-            print(f"Difference reserved:  {(end_reserved-start_reserved)/1024**3:.2f} GB")
+            # print(f"\n=== Memory tracking end ===")
+            # print(f"Allocated: {end_allocated/1024**3:.2f} GB")
+            # print(f"Reserved:  {end_reserved/1024**3:.2f} GB")
+            # print(f"Difference allocated: {(end_allocated-start_allocated)/1024**3:.2f} GB")
+            # print(f"Difference reserved:  {(end_reserved-start_reserved)/1024**3:.2f} GB")
 
 def clear_memory():
     """Helper function to clear memory"""

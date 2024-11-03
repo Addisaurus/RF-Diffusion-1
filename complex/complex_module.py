@@ -14,33 +14,33 @@ def apply_complex(F_r, F_i, X):
         F_i (nn.Linear): Imaginary component linear transformation 
         X (torch.Tensor): Input tensor of shape [..., 2] where last dim is [real, imag]
     """
-    print("\n=== Complex Module Debug ===")
-    print(f"Input X shape: {X.shape}")
-    print(f"F_r input features: {F_r.in_features}, output features: {F_r.out_features}")
+    # print("\n=== Complex Module Debug ===")
+    # print(f"Input X shape: {X.shape}")
+    # print(f"F_r input features: {F_r.in_features}, output features: {F_r.out_features}")
     
     # Split into real and imaginary components
     split_tensors = torch.split(X, 1, dim=-1)
-    print(f"Number of split tensors: {len(split_tensors)}")
-    print(f"Split tensor shapes: {[t.shape for t in split_tensors]}")
+    # print(f"Number of split tensors: {len(split_tensors)}")
+    # print(f"Split tensor shapes: {[t.shape for t in split_tensors]}")
     
     if len(split_tensors) != 2:
         raise ValueError(f"Expected tensor with 2 components in last dimension, got {len(split_tensors)}")
         
     # Remove the extra dimension from split
     X_r, X_i = [x.squeeze(dim=-1) for x in split_tensors]
-    print(f"X_r shape after squeeze: {X_r.shape}")
-    print(f"X_i shape after squeeze: {X_i.shape}")
+    # print(f"X_r shape after squeeze: {X_r.shape}")
+    # print(f"X_i shape after squeeze: {X_i.shape}")
     
     # Apply complex multiplication:
     # (a + bi)(x + yi) = (ax - by) + (ay + bx)i
     real_output = F_r(X_r) - F_i(X_i)
     imag_output = F_r(X_i) + F_i(X_r)
     
-    print(f"Output shape before stack: {real_output.shape}")
+    # print(f"Output shape before stack: {real_output.shape}")
     
     # Stack back into complex form
     result = torch.stack((real_output, imag_output), dim=-1)
-    print(f"Final output shape: {result.shape}")
+    # print(f"Final output shape: {result.shape}")
     return result
 
 def apply_complex_sep(F_r, F_i, X):
@@ -295,31 +295,40 @@ class Complex2Real(nn.Module):
         return X.squeeze(dim=-1)
 
 class ComplexDotProductAttention(nn.Module):
-    def __init__(self, dropout, **kwargs):
+    def __init__(self, dropout, chunk_size=128, **kwargs):
         super().__init__()
         self.dropout = ComplexDropout(dropout)
+        self.chunk_size = chunk_size
 
     def forward(self, queries, keys, values):
         batch_size, seq_len, feature_dim = queries.shape[:-1]
         
-        print(f"\n=== Attention Dimensions ===")
-        print(f"Batch size: {batch_size}")
-        print(f"Sequence length: {seq_len}")
-        print(f"Feature dimension: {feature_dim}")
+        # Initialize output tensor
+        output = torch.zeros_like(values)
         
-        # Compute attention scores
-        # (b, seq, d, 2) @ (b, d, seq, 2) -> (b, seq, seq, 2)
-        keys_t = keys.transpose(1, 2)
-        scores = complex_bmm(queries, keys_t) / math.sqrt(feature_dim)
+        # Process sequence in chunks
+        for chunk_start in range(0, seq_len, self.chunk_size):
+            chunk_end = min(chunk_start + self.chunk_size, seq_len)
+            
+            # Get current chunk of queries
+            q_chunk = queries[:, chunk_start:chunk_end]
+            
+            # Calculate attention scores for this chunk
+            scores = complex_bmm(q_chunk, keys.transpose(1, 2)) / math.sqrt(feature_dim)
+            
+            # Apply softmax and dropout
+            attention_weights = complex_softmax(scores)
+            attention_weights = self.dropout(attention_weights)
+            
+            # Apply attention to values
+            chunk_output = complex_bmm(attention_weights, values)
+            
+            # Store chunk output
+            output[:, chunk_start:chunk_end] = chunk_output
+            
+            # Force GPU memory clearing after each chunk
+            torch.cuda.empty_cache()
         
-        # Apply softmax and dropout
-        attention_weights = complex_softmax(scores)
-        attention_weights = self.dropout(attention_weights)
-        
-        # Apply attention to values
-        output = complex_bmm(attention_weights, values)
-        
-        print(f"Attention output shape: {output.shape}")
         return output
 
 
@@ -327,10 +336,10 @@ class ComplexMultiHeadAttention(nn.Module):
     def __init__(self, query_size, num_hiddens, num_heads, dropout, key_size=None, 
                  value_size=None, bias=False):
         super().__init__()
-        print(f"\n=== Initializing MultiHeadAttention ===")
-        print(f"Query size: {query_size}")
-        print(f"Num hiddens: {num_hiddens}")
-        print(f"Num heads: {num_heads}")
+        # print(f"\n=== Initializing MultiHeadAttention ===")
+        # print(f"Query size: {query_size}")
+        # print(f"Num hiddens: {num_hiddens}")
+        # print(f"Num heads: {num_heads}")
         
         key_size = key_size or query_size
         value_size = value_size or query_size
@@ -350,8 +359,8 @@ class ComplexMultiHeadAttention(nn.Module):
     def forward(self, queries, keys, values):
         batch_size, seq_len, _ = queries.shape[:-1]
         
-        print(f"\n=== MultiHeadAttention Forward ===")
-        print(f"Input shapes: Q={queries.shape}, K={keys.shape}, V={values.shape}")
+        # print(f"\n=== MultiHeadAttention Forward ===")
+        # print(f"Input shapes: Q={queries.shape}, K={keys.shape}, V={values.shape}")
         
         # Linear transformations
         queries = self.w_q(queries)
@@ -381,7 +390,7 @@ class ComplexMultiHeadAttention(nn.Module):
         # Final linear transformation
         output = self.w_o(output)
         
-        print(f"Output shape: {output.shape}")
+        # print(f"Output shape: {output.shape}")
         return output
 
 

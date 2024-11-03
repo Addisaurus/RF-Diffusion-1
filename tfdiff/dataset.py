@@ -190,9 +190,9 @@ class Collator:
     def __init__(self, params):
         self.params = params
         self.target_length = params.target_sequence_length
-        print(f"\n=== Collator Configuration ===")
-        print(f"Original sample rate: {params.sample_rate}")
-        print(f"Target sequence length: {self.target_length}")
+        # print(f"\n=== Collator Configuration ===")
+        # print(f"Original sample rate: {params.sample_rate}")
+        # print(f"Target sequence length: {self.target_length}")
         
     def collate(self, minibatch):
         sample_rate = self.params.sample_rate
@@ -201,13 +201,13 @@ class Collator:
         target_length = self.params.target_sequence_length  # Much smaller than 32768
 
         if task_id == 4:  # ModRec task
-            print(f"\n=== Collating Batch ===")
-            print(f"Initial batch size: {len(minibatch)}")
+            # print(f"\n=== Collating Batch ===")
+            # print(f"Initial batch size: {len(minibatch)}")
             
             resampled_batch = []
             for record in minibatch:
                 data = record['data']  # [N, 2]
-                print(f"Original data shape: {data.shape}")
+                # print(f"Original data shape: {data.shape}")
                 
                 # Convert to complex numpy array for resampling
                 complex_data = data[:, 0] + 1j * data[:, 1]
@@ -229,7 +229,7 @@ class Collator:
                     torch.from_numpy(resampled.imag)
                 ], dim=-1).float()
                 
-                print(f"Resampled shape before norm: {resampled_data.shape}")
+                # print(f"Resampled shape before norm: {resampled_data.shape}")
                 
                 # Normalize
                 norm_data = (resampled_data - resampled_data.mean()) / resampled_data.std()
@@ -239,9 +239,9 @@ class Collator:
             data = torch.stack(resampled_batch)
             cond = torch.stack([record['cond'] for record in minibatch])
             
-            print(f"Final batch shapes:")
-            print(f"Data: {data.shape}")   # Should be [B, target_length, 2]
-            print(f"Cond: {cond.shape}")  
+            # print(f"Final batch shapes:")
+            # print(f"Data: {data.shape}")   # Should be [B, target_length, 2]
+            # print(f"Cond: {cond.shape}")  
             
             return {
                 'data': data,

@@ -2,21 +2,35 @@ import numpy as np
 import yaml
 import os
 from pathlib import Path
+from .schedules import DiffusionScheduler
 
 class AttrDict(dict):
     def __init__(self, *args, **kwargs):
         super(AttrDict, self).__init__(*args, **kwargs)
-        self.__dict__ = self
+        for arg in args:
+            if isinstance(arg, dict):
+                for k, v in arg.items():
+                    if isinstance(v, dict):
+                        self[k] = AttrDict(v)
+                    else:
+                        self[k] = v
 
-    def override(self, attrs):
-        if isinstance(attrs, dict):
-            self.__dict__.update(**attrs)
-        elif isinstance(attrs, (list, tuple, set)):
-            for attr in attrs:
-                self.override(attr)
-        elif attrs is not None:
-            raise NotImplementedError
-        return self
+        if kwargs:
+            for k, v in kwargs.items():
+                if isinstance(v, dict):
+                    self[k] = AttrDict(v)
+                else:
+                    self[k] = v
+
+    def __getattr__(self, attr):
+        return self.get(attr)
+
+    def __setattr__(self, key, value):
+        self.__setitem__(key, value)
+
+    def __setitem__(self, key, value):
+        super(AttrDict, self).__setitem__(key, value)
+        self.__dict__.update({key: value})
 
 def expr_constructor(loader, node):
     """Constructor for handling !expr tags in YAML"""
@@ -38,10 +52,22 @@ def load_config(name):
     config_path = config_dir / f'{name}.yaml'
     
     with open(config_path) as f:
-        # Use our custom loader instead of safe_load
         config = yaml.load(f, Loader=ExprLoader)
     
-    return AttrDict(config)
+    # Convert to recursive AttrDict
+    config = AttrDict(config)
+    
+    # Generate schedules based on config
+    blur_schedule, noise_schedule = DiffusionScheduler.generate_schedules(
+        config,
+        config.get('max_step', 200)  # Default to 200 steps if not specified
+    )
+    
+    # Add schedules to config
+    config.blur_schedule = blur_schedule
+    config.noise_schedule = noise_schedule
+    
+    return config
 
 # Load all configurations
 params_wifi = load_config('wifi')

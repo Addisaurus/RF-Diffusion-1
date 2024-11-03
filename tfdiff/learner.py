@@ -7,6 +7,8 @@ from tqdm import tqdm
 from tfdiff.diffusion import SignalDiffusion, GaussianDiffusion
 from tfdiff.dataset import _nested_map
 from tfdiff.memory_utils import track_memory, clear_memory
+from tfdiff.rf_metrics import RFMetrics
+import matplotlib.pyplot as plt
 
 class tfdiffLoss(nn.Module):
     def __init__(self, w=0.1):
@@ -45,6 +47,14 @@ class tfdiffLearner:
         self.is_master = True
         self.loss_fn = nn.MSELoss()
 
+        # Initialize RF metrics
+        self.rf_metrics = RFMetrics()
+        
+        # For tracking moving averages of metrics
+        self.metric_window_size = 100
+        self.ssim_history = []
+        self.fid_history = []
+
         # Initialize wandb only on master process
         if self.is_master:
             wandb.init(
@@ -64,6 +74,47 @@ class tfdiffLearner:
                 },
                 name=f"task_{params.task_id}_{type(model).__name__}"
             )
+
+            # CUSTOM PANEL LAYOUT CODE
+            # Define custom chart layouts
+            wandb.define_metric("train/loss", summary="min")
+            wandb.define_metric("metrics/ssim", summary="max")
+            wandb.define_metric("metrics/fid", summary="min")
+            
+            # Create custom dashboard
+            wandb.run.log_config({
+                "layouts": {
+                    "Training Progress": {
+                        "Training Metrics": {
+                            "panel_type": "line",
+                            "panel_config": {
+                                "metrics": [
+                                    "train/loss",
+                                    "metrics/ssim_moving_avg",
+                                    "metrics/fid_moving_avg"
+                                ]
+                            }
+                        },
+                        "Sample Visualizations": {
+                            "panel_type": "images",
+                            "panel_config": {
+                                "metrics": ["samples"]
+                            }
+                        },
+                        "System Metrics": {
+                            "panel_type": "line",
+                            "panel_config": {
+                                "metrics": [
+                                    "system/gpu_utilization",
+                                    "system/gpu_memory_allocated",
+                                    "system/gpu_memory_reserved"
+                                ]
+                            }
+                        }
+                    }
+                }
+            })
+            
             # Log model architecture
             wandb.watch(model, log="all", log_freq=100)
 
@@ -131,7 +182,7 @@ class tfdiffLearner:
                     device) if isinstance(x, torch.Tensor) else x)
                     
                 # Track full iteration memory
-                print(f"\n=== Iteration {self.iter} Memory ===")
+                # print(f"\n=== Iteration {self.iter} Memory ===")
                 loss = self.train_iter(features)
                 
                 if torch.isnan(loss).any():
@@ -152,69 +203,152 @@ class tfdiffLearner:
             self.lr_scheduler.step()
 
     def train_iter(self, features):
-        with track_memory():
-            self.optimizer.zero_grad()
-            data = features['data']  # original data, x_0, [B, N, 2]
-            cond = features['cond']  # cond, c, [B, C]
-            B = data.shape[0]
+        with torch.cuda.amp.autocast():
+            with track_memory():
+                self.optimizer.zero_grad()
+                data = features['data']  # original data, x_0, [B, N, 2]
+                cond = features['cond']  # cond, c, [B, C]
+                
+                # Clear cache before forward pass
+                torch.cuda.empty_cache()
+                
+                B = data.shape[0]
+                
+                # print("\n=== Training Iteration Shapes ===")
+                # print(f"Original data shape: {data.shape}")
+                # print(f"Condition shape: {cond.shape}")
+                
+                # random diffusion step, [B]
+                t = torch.randint(0, self.diffusion.max_step, [B], dtype=torch.int64, device=self.device)
+                # print(f"Timesteps shape: {t.shape}")
+                
+                # Track memory during forward pass
+                # print("\n=== Forward Pass Memory ===")
+                degrade_data = self.diffusion.degrade_fn(
+                    data, t, self.task_id)  # degrade data, x_t, [B, N, 2]
+                # print(f"Degraded data shape: {degrade_data.shape}")
+                
+                predicted = self.model(degrade_data, t, cond)
+                # print(f"Model output shape: {predicted.shape}")
+                # print(f"Target shape: {data.shape}")
+                
+                # Ensure target and prediction have same shape
+                if data.shape != predicted.shape:
+                    # Remove extra dimensions from prediction if needed
+                    if len(predicted.shape) == 4:
+                        predicted = predicted.squeeze(2)
+                    print(f"Adjusted prediction shape: {predicted.shape}")
+                
+                # Verify shapes match
+                assert data.shape == predicted.shape, f"Shape mismatch: target {data.shape} vs prediction {predicted.shape}"
+                
+                loss = self.loss_fn(data, predicted)
+                print(f"Loss value: {loss.item()}")
+                
+                # Track memory during backward pass
+                # print("\n=== Backward Pass Memory ===")
+                loss.backward()
+                
+                self.grad_norm = nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.params.max_grad_norm or 1e9)
+                
+                self.optimizer.step()
+                
+                # Clear memory after iteration
+                clear_memory()
+                
+                return loss
+
+    def _compute_metrics(self, real_data, generated_data):
+        """Compute FID and SSIM metrics"""
+        with torch.no_grad():
+            # Move tensors to CPU to avoid additional GPU memory usage
+            real_cpu = real_data.cpu()
+            generated_cpu = generated_data.cpu()
             
-            print("\n=== Training Iteration Shapes ===")
-            print(f"Original data shape: {data.shape}")
-            print(f"Condition shape: {cond.shape}")
+            # Calculate SSIM
+            ssim = self.rf_metrics.complex_ssim(real_cpu, generated_cpu)
             
-            # random diffusion step, [B]
-            t = torch.randint(0, self.diffusion.max_step, [B], dtype=torch.int64, device=self.device)
-            print(f"Timesteps shape: {t.shape}")
+            # Calculate FID
+            fid = self.rf_metrics.rf_fid(real_cpu, generated_cpu)
             
-            # Track memory during forward pass
-            print("\n=== Forward Pass Memory ===")
-            degrade_data = self.diffusion.degrade_fn(
-                data, t, self.task_id)  # degrade data, x_t, [B, N, 2]
-            print(f"Degraded data shape: {degrade_data.shape}")
-            
-            predicted = self.model(degrade_data, t, cond)
-            print(f"Model output shape: {predicted.shape}")
-            print(f"Target shape: {data.shape}")
-            
-            # Ensure target and prediction have same shape
-            if data.shape != predicted.shape:
-                # Remove extra dimensions from prediction if needed
-                if len(predicted.shape) == 4:
-                    predicted = predicted.squeeze(2)
-                print(f"Adjusted prediction shape: {predicted.shape}")
-            
-            # Verify shapes match
-            assert data.shape == predicted.shape, f"Shape mismatch: target {data.shape} vs prediction {predicted.shape}"
-            
-            loss = self.loss_fn(data, predicted)
-            print(f"Loss value: {loss.item()}")
-            
-            # Track memory during backward pass
-            print("\n=== Backward Pass Memory ===")
-            loss.backward()
-            
-            self.grad_norm = nn.utils.clip_grad_norm_(
-                self.model.parameters(), self.params.max_grad_norm or 1e9)
-            
-            self.optimizer.step()
-            
-            # Clear memory after iteration
-            clear_memory()
-            
-            return loss
+            return ssim.item(), fid
 
     def _write_summary(self, iter, features, loss):
         if not self.is_master:
             return
             
+        # Get a sample batch for metrics
+        with torch.no_grad():
+            # Generate samples using the current model
+            device = next(self.model.parameters()).device
+            cond = features['cond'].to(device)
+            real_data = features['data'].to(device)
+            
+            # Generate samples
+            noise = torch.randn_like(real_data)
+            generated_data = self.model(noise, torch.zeros(noise.shape[0], dtype=torch.long, device=device), cond)
+            
+            # Compute metrics
+            ssim, fid = self._compute_metrics(real_data, generated_data)
+            
+            # Update metric histories
+            self.ssim_history.append(ssim)
+            self.fid_history.append(fid)
+            
+            # Keep only recent values
+            if len(self.ssim_history) > self.metric_window_size:
+                self.ssim_history.pop(0)
+                self.fid_history.pop(0)
+            
+            # Calculate moving averages
+            avg_ssim = sum(self.ssim_history) / len(self.ssim_history)
+            avg_fid = sum(self.fid_history) / len(self.fid_history)
+        
         metrics = {
             "train/loss": loss.item(),
             "train/grad_norm": self.grad_norm,
             "train/learning_rate": self.optimizer.param_groups[0]['lr'],
             "train/epoch": iter // len(self.dataset),
+            "metrics/ssim": ssim,
+            "metrics/fid": fid,
+            "metrics/ssim_moving_avg": avg_ssim,
+            "metrics/fid_moving_avg": avg_fid,
             "system/gpu_utilization": torch.cuda.utilization() if torch.cuda.is_available() else 0,
-            "system/gpu_memory_allocated": torch.cuda.memory_allocated(self.device) / 1024**3 if torch.cuda.is_available() else 0,  # Convert to GB
+            "system/gpu_memory_allocated": torch.cuda.memory_allocated(self.device) / 1024**3 if torch.cuda.is_available() else 0,
             "system/gpu_memory_reserved": torch.cuda.memory_reserved(self.device) / 1024**3 if torch.cuda.is_available() else 0,
         }
         
+        # Log metrics to wandb
         wandb.log(metrics, step=iter)
+        
+        # Also log sample visualizations periodically
+        if iter % 500 == 0:  # Adjust frequency as needed
+            try:
+                # Create figure with subplots
+                fig, axes = plt.subplots(2, 2, figsize=(12, 12))
+                
+                # Plot real and generated samples in time domain
+                axes[0,0].plot(real_data[0,:,0].cpu().numpy())
+                axes[0,0].set_title('Real Signal (Time Domain)')
+                
+                axes[0,1].plot(generated_data[0,:,0].cpu().numpy())
+                axes[0,1].set_title('Generated Signal (Time Domain)')
+                
+                # Plot real and generated samples in frequency domain
+                real_fft = np.abs(np.fft.fft(real_data[0,:,0].cpu().numpy()))
+                gen_fft = np.abs(np.fft.fft(generated_data[0,:,0].cpu().numpy()))
+                
+                axes[1,0].plot(real_fft)
+                axes[1,0].set_title('Real Signal (Frequency Domain)')
+                
+                axes[1,1].plot(gen_fft)
+                axes[1,1].set_title('Generated Signal (Frequency Domain)')
+                
+                plt.tight_layout()
+                
+                # Log figure to wandb
+                wandb.log({"samples": wandb.Image(fig)}, step=iter)
+                plt.close(fig)
+            except Exception as e:
+                print(f"Warning: Failed to log sample visualizations: {e}")

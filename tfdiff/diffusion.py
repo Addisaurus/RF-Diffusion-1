@@ -5,26 +5,26 @@ from torch.nn import functional as F
 
 def print_tensor_info(tensor, name, batch_idx=0):
     """Print detailed tensor information including shape, type, and sample values"""
-    print(f"\n=== {name} ===")
-    print(f"Shape: {tensor.shape}")
-    print(f"Type: {tensor.dtype}")
-    print(f"Device: {tensor.device}")
-    print(f"Min/Max: {tensor.min():.4f} / {tensor.max():.4f}")
-    print(f"Mean/Std: {tensor.mean():.4f} / {tensor.std():.4f}")
+    # print(f"\n=== {name} ===")
+    # print(f"Shape: {tensor.shape}")
+    # print(f"Type: {tensor.dtype}")
+    # print(f"Device: {tensor.device}")
+    # print(f"Min/Max: {tensor.min():.4f} / {tensor.max():.4f}")
+    # print(f"Mean/Std: {tensor.mean():.4f} / {tensor.std():.4f}")
     if len(tensor.shape) > 1:
-        print(f"Sample from batch {batch_idx}:")
+        # print(f"Sample from batch {batch_idx}:")
         sample = tensor[batch_idx] if tensor.shape[0] > batch_idx else tensor[0]
-        print(sample[:5])  # First 5 elements
-    print("=" * 50)
+        # print(sample[:5])  # First 5 elements
+    # print("=" * 50)
 
 class SignalDiffusion(nn.Module):
     def __init__(self, params):
         super().__init__()
-        print("\n=== Initializing SignalDiffusion ===")
-        print(f"Task ID: {params.task_id}")
-        print(f"Sample Rate: {params.sample_rate}")
-        print(f"Extra Dimensions: {params.extra_dim}")
-        print(f"Max Steps: {params.max_step}")
+        # print("\n=== Initializing SignalDiffusion ===")
+        # print(f"Task ID: {params.task_id}")
+        # print(f"Sample Rate: {params.sample_rate}")
+        # print(f"Extra Dimensions: {params.extra_dim}")
+        # print(f"Max Steps: {params.max_step}")
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.params = params
         self.task_id = params.task_id
@@ -47,13 +47,13 @@ class SignalDiffusion(nn.Module):
         self.noise_weights = self.get_noise_weights().to(device) # [T, N]
 
         # Debug noise and blur schedules
-        print("\n=== Diffusion Schedules ===")
-        print(f"Noise schedule range: {min(params.noise_schedule):.6f} to {max(params.noise_schedule):.6f}")
-        print(f"Blur schedule range: {min(params.blur_schedule):.6f} to {max(params.blur_schedule):.6f}")
+        # print("\n=== Diffusion Schedules ===")
+        # print(f"Noise schedule range: {min(params.noise_schedule):.6f} to {max(params.noise_schedule):.6f}")
+        # print(f"Blur schedule range: {min(params.blur_schedule):.6f} to {max(params.blur_schedule):.6f}")
 
-        print(f"\n=== Weight Shapes ===")
-        print(f"Noise weights shape: {self.noise_weights.shape}")
-        print(f"Info weights shape: {self.info_weights.shape}")
+        # print(f"\n=== Weight Shapes ===")
+        # print(f"Noise weights shape: {self.noise_weights.shape}")
+        # print(f"Info weights shape: {self.info_weights.shape}")
       
     def get_kernel(self, var_kernel):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -115,11 +115,11 @@ class SignalDiffusion(nn.Module):
         device = x_0.device
         batch_size, seq_len, _ = x_0.shape
         
-        print("\n=== Starting degrade_fn ===")
-        print(f"Input signal shape: {x_0.shape}")
-        print(f"Input signal device: {device}")
-        print(f"Timestep t: {t}")
-        print(f"Timestep device: {t.device}")
+        # print("\n=== Starting degrade_fn ===")
+        # print(f"Input signal shape: {x_0.shape}")
+        # print(f"Input signal device: {device}")
+        # print(f"Timestep t: {t}")
+        # print(f"Timestep device: {t.device}")
         
         # Verify dimensions
         if seq_len != self.input_dim:
@@ -134,16 +134,16 @@ class SignalDiffusion(nn.Module):
             noise_weight = self.noise_weights[t_cpu, :seq_len].unsqueeze(-1).to(device)
             info_weight = self.info_weights[t_cpu, :seq_len].unsqueeze(-1).to(device)
             
-            print(f"Noise weight shape: {noise_weight.shape}")
-            print(f"Info weight shape: {info_weight.shape}")
-            print(f"x_0 shape: {x_0.shape}")
+            # print(f"Noise weight shape: {noise_weight.shape}")
+            # print(f"Info weight shape: {info_weight.shape}")
+            # print(f"x_0 shape: {x_0.shape}")
         
         # Generate and apply noise
         noise = torch.randn_like(x_0, dtype=torch.float32, device=device)
         noise = noise_weight * noise  # Will broadcast across batch dimension
         x_t = info_weight * x_0 + noise
         
-        print(f"Output shape: {x_t.shape}")
+        # print(f"Output shape: {x_t.shape}")
         return x_t
 
 

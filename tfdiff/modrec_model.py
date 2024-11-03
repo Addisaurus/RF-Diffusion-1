@@ -80,38 +80,38 @@ class MLPConditionEmbedding(nn.Module):
 class PositionEmbedding(nn.Module):
     def __init__(self, max_len, input_dim, hidden_dim):
         super().__init__()
-        print(f"\n=== PositionEmbedding Init ===")
-        print(f"max_len: {max_len}, input_dim: {input_dim}, hidden_dim: {hidden_dim}")
+        # print(f"\n=== PositionEmbedding Init ===")
+        # print(f"max_len: {max_len}, input_dim: {input_dim}, hidden_dim: {hidden_dim}")
         self.register_buffer('embedding', self._build_embedding(
             max_len, hidden_dim), persistent=False)
         self.projection = cm.ComplexLinear(input_dim, hidden_dim)
-        print(f"Embedding shape: {self.embedding.shape}")
+        # print(f"Embedding shape: {self.embedding.shape}")
         self.apply(init_weight_xavier)
 
     def forward(self, x): 
-        print("\n=== PositionEmbedding Forward Pass ===")
-        print(f"Input x shape: {x.shape}")  # Should be [B, N, 2]
+        # print("\n=== PositionEmbedding Forward Pass ===")
+        # print(f"Input x shape: {x.shape}")  # Should be [B, N, 2]
         batch_size, seq_len, _ = x.shape
         
         # Reshape to [B*N, 1, 2] for the linear projection
         x = x.reshape(-1, 1, 2)
-        print(f"Reshaped input shape: {x.shape}")
+        # print(f"Reshaped input shape: {x.shape}")
         
         # Apply projection
         x = self.projection(x)  # Now [B*N, hidden_dim, 2]
-        print(f"After projection shape: {x.shape}")
+        # print(f"After projection shape: {x.shape}")
         
         # Reshape back to [B, N, hidden_dim, 2]
         x = x.reshape(batch_size, seq_len, -1, 2)
-        print(f"Reshaped back: {x.shape}")
+        # print(f"Reshaped back: {x.shape}")
         
         # Get embedding and ensure it's on the right device
         embedding = self.embedding.to(x.device)  # [N, hidden_dim, 2]
-        print(f"Embedding shape: {embedding.shape}")
+        # print(f"Embedding shape: {embedding.shape}")
         
         # Multiply with positional embedding 
         result = cm.complex_mul(x, embedding[:seq_len, :, :].unsqueeze(0))
-        print(f"Final output shape: {result.shape}")
+        # print(f"Final output shape: {result.shape}")
         return result
 
     def _build_embedding(self, max_len, hidden_dim):
@@ -124,12 +124,9 @@ class PositionEmbedding(nn.Module):
 class DiA(nn.Module):
     def __init__(self, hidden_dim, num_heads, dropout, mlp_ratio=4.0):
         super().__init__()
-        self.norm1 = cm.NaiveComplexLayerNorm(
-            hidden_dim, eps=1e-6, elementwise_affine=False)
-        self.attn = cm.ComplexMultiHeadAttention(
-            hidden_dim, hidden_dim, num_heads, dropout, bias=True)
-        self.norm2 = cm.NaiveComplexLayerNorm(
-            hidden_dim, eps=1e-6, elementwise_affine=False)
+        self.norm1 = cm.NaiveComplexLayerNorm(hidden_dim, eps=1e-6, elementwise_affine=False)
+        self.attn = cm.ComplexMultiHeadAttention(hidden_dim, hidden_dim, num_heads, dropout, bias=True)
+        self.norm2 = cm.NaiveComplexLayerNorm(hidden_dim, eps=1e-6, elementwise_affine=False)
         mlp_hidden_dim = int(hidden_dim * mlp_ratio)
         self.mlp = nn.Sequential(
             cm.ComplexLinear(hidden_dim, mlp_hidden_dim, bias=True),
@@ -140,17 +137,19 @@ class DiA(nn.Module):
             cm.ComplexSiLU(),
             cm.ComplexLinear(hidden_dim, 6*hidden_dim, bias=True)
         )
-        self.apply(init_weight_xavier)
-        self.adaLN_modulation.apply(init_weight_zero)
-
-    def forward(self, x, c):
-        print("\n=== DiA Layer ===")
-        print(f"Input shape: {x.shape}")
-        print(f"Condition shape: {c.shape}")
         
+        # Enable gradient checkpointing
+        self.use_checkpointing = True
+        
+    def forward(self, x, c):
+        if self.use_checkpointing and self.training:
+            return torch.utils.checkpoint.checkpoint(self._forward, x, c)
+        return self._forward(x, c)
+        
+    def _forward(self, x, c):
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = \
             self.adaLN_modulation(c).chunk(6, dim=1)
-        
+            
         # Modulate input for attention
         mod_x = modulate(self.norm1(x), shift_msa, scale_msa)
         
@@ -162,7 +161,6 @@ class DiA(nn.Module):
         mod_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
         x = x + gate_mlp.unsqueeze(1) * self.mlp(mod_x)
         
-        print(f"Output shape: {x.shape}")
         return x
 
 class FinalLayer(nn.Module):
@@ -178,8 +176,8 @@ class FinalLayer(nn.Module):
         self.apply(init_weight_zero)
 
     def forward(self, x, c):
-        print("\n=== Final Layer Shapes ===")
-        print(f"Input x shape: {x.shape}")
+        # print("\n=== Final Layer Shapes ===")
+        # print(f"Input x shape: {x.shape}")
         
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
         x = modulate(self.norm(x), shift, scale)
@@ -190,16 +188,16 @@ class FinalLayer(nn.Module):
         x = self.linear(x_reshaped)
         x = x.reshape(B, N, -1, 2)
         
-        print(f"Output shape: {x.shape}")
+        # print(f"Output shape: {x.shape}")
         return x
 
 class tfdiff_ModRec(nn.Module):
     def __init__(self, params):
         super().__init__()
-        print("\n=== Initializing ModRec Model ===")
-        print(f"Input dim: {params.input_dim}")
-        print(f"Hidden dim: {params.hidden_dim}")
-        print(f"Target sequence length: {params.target_sequence_length}")
+        # print("\n=== Initializing ModRec Model ===")
+        # print(f"Input dim: {params.input_dim}")
+        # print(f"Hidden dim: {params.hidden_dim}")
+        # print(f"Target sequence length: {params.target_sequence_length}")
         
         self.params = params
         self.input_dim = params.input_dim  
@@ -227,7 +225,7 @@ class tfdiff_ModRec(nn.Module):
             params.hidden_dim
         )
         
-        print(f"Conditioning dimension: {self.conditioning_manager.conditioning_dim}")
+        # print(f"Conditioning dimension: {self.conditioning_manager.conditioning_dim}")
         
         # Attention blocks
         self.blocks = nn.ModuleList([
@@ -246,20 +244,20 @@ class tfdiff_ModRec(nn.Module):
         )
 
     def forward(self, x, t, c):
-        print("\n=== Model Forward Pass Start ===")
-        print(f"Input x shape: {x.shape}")
+        # print("\n=== Model Forward Pass Start ===")
+        # print(f"Input x shape: {x.shape}")
         
         # Embed positions
         x = self.p_embed(x)
-        print(f"After position embedding: {x.shape}")
+        # print(f"After position embedding: {x.shape}")
         
         # Embed diffusion timestep
         t = self.t_embed(t)
-        print(f"Timestep embedding: {t.shape}")
+        # print(f"Timestep embedding: {t.shape}")
         
         # Embed conditioning info
         c = self.c_embed(c)
-        print(f"Condition embedding: {c.shape}")
+        # print(f"Condition embedding: {c.shape}")
         
         # Combine condition with diffusion step
         c = c + t
@@ -267,10 +265,10 @@ class tfdiff_ModRec(nn.Module):
         # Process through attention blocks
         for i, block in enumerate(self.blocks):
             x = block(x, c)
-            print(f"After block {i}: {x.shape}")
+            # print(f"After block {i}: {x.shape}")
             
         # Generate final output
         x = self.final_layer(x, c)
-        print(f"Final output shape: {x.shape}")
+        # print(f"Final output shape: {x.shape}")
         
         return x

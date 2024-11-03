@@ -16,34 +16,60 @@ from tfdiff.learner import tfdiffLearner
 from tfdiff.dataset import from_path
 from tfdiff.params import load_config, override_from_args
 from tfdiff.diffusion import SignalDiffusion, GaussianDiffusion
+import wandb
 
 def _get_free_port():
     import socketserver
     with socketserver.TCPServer(('localhost', 0), None) as s:
         return s.server_address[1]
 
-def plot_schedules(params):
+def analyze_diffusion_schedules(params):
     """Visualize noise and blur schedules"""
     plt.figure(figsize=(12, 6))
     
-    # Plot noise schedule
-    plt.subplot(1, 2, 1)
-    plt.plot(params.noise_schedule)
-    plt.title('Noise Schedule')
-    plt.xlabel('Diffusion Step')
-    plt.ylabel('Noise Level (β)')
-    plt.grid(True)
+    # Handle both dictionary and object access
+    schedule_config = getattr(params, 'schedule_config', {})
+    blur_config = getattr(schedule_config, 'blur_schedule', {}) if schedule_config else {}
+    noise_config = getattr(schedule_config, 'noise_schedule', {}) if schedule_config else {}
     
-    # Plot blur schedule
-    plt.subplot(1, 2, 2)
-    plt.plot(params.blur_schedule)
+    blur_schedule = getattr(params, 'blur_schedule', [])
+    noise_schedule = getattr(params, 'noise_schedule', [])
+    
+    # Get schedule types safely
+    blur_type = blur_config.get('type', 'linear') if isinstance(blur_config, dict) else 'linear'
+    noise_type = noise_config.get('type', 'linear') if isinstance(noise_config, dict) else 'linear'
+    
+    # Plot schedules
+    plt.subplot(1, 2, 1)
+    plt.plot(blur_schedule, label=f'Blur ({blur_type})')
     plt.title('Blur Schedule')
     plt.xlabel('Diffusion Step')
-    plt.ylabel('Blur Level')
+    plt.ylabel('Blur Level (β)')
     plt.grid(True)
+    plt.legend()
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(noise_schedule, label=f'Noise ({noise_type})')
+    plt.title('Noise Schedule')
+    plt.xlabel('Diffusion Step')
+    plt.ylabel('Noise Level')
+    plt.grid(True)
+    plt.legend()
     
     plt.tight_layout()
     plt.savefig('diffusion_schedules.png')
+    
+    # Log to wandb if available
+    if wandb.run is not None:
+        wandb.log({
+            "schedules/analysis": wandb.Image('diffusion_schedules.png'),
+            "schedules/blur_type": blur_type,
+            "schedules/noise_type": noise_type,
+            "schedules/blur_mean": np.mean(blur_schedule),
+            "schedules/noise_mean": np.mean(noise_schedule),
+            "schedules/blur_std": np.std(blur_schedule),
+            "schedules/noise_std": np.std(noise_schedule),
+        })
     plt.close()
 
 def evaluate_schedules(params, sample_data):
@@ -61,21 +87,21 @@ def evaluate_schedules(params, sample_data):
     steps_to_test = [0, params.max_step // 4, params.max_step // 2, 
                      3 * params.max_step // 4, params.max_step - 1]
     
-    print("\n=== Starting Schedule Evaluation ===")
-    print(f"Sample data shape: {sample_data.shape}")
-    print(f"Sample data device: {device}")
-    print(f"Testing steps: {steps_to_test}")
+    # print("\n=== Starting Schedule Evaluation ===")
+    # print(f"Sample data shape: {sample_data.shape}")
+    # print(f"Sample data device: {device}")
+    # print(f"Testing steps: {steps_to_test}")
     
     plt.figure(figsize=(15, 10))
     
     for i, t in enumerate(steps_to_test, 1):
         # Apply diffusion
         t_tensor = torch.tensor([t], device=device)
-        print(f"\nProcessing step {t}")
-        print(f"Input tensor shape: {sample_data.shape}")
+        # print(f"\nProcessing step {t}")
+        # print(f"Input tensor shape: {sample_data.shape}")
         
         x_t = diffusion.degrade_fn(sample_data, t_tensor, params.task_id)
-        print(f"Output tensor shape: {x_t.shape}")
+        # print(f"Output tensor shape: {x_t.shape}")
         
         # Plot time domain
         plt.subplot(2, len(steps_to_test), i)
@@ -95,9 +121,9 @@ def evaluate_schedules(params, sample_data):
     plt.close()
     
     # Print and save statistical analysis
-    print("\n=== Schedule Analysis ===")
+    # print("\n=== Schedule Analysis ===")
     signal_power = torch.mean(torch.abs(sample_data) ** 2)
-    print(f"Original signal power: {signal_power:.4f}")
+    # print(f"Original signal power: {signal_power:.4f}")
     
     analysis_results = []
     for t in steps_to_test:
@@ -106,7 +132,7 @@ def evaluate_schedules(params, sample_data):
         noise_power = torch.mean(torch.abs(x_t - sample_data) ** 2)
         snr = 10 * torch.log10(signal_power / noise_power)
         result = f"Step {t}: SNR = {snr:.2f} dB"
-        print(result)
+        # print(result)
         analysis_results.append(result)
     
     # Save analysis results to file
@@ -136,7 +162,7 @@ def _train_impl(replica_id, model, dataset, params):
 def train(params):
     """Main training function with added diagnostics"""
     # Plot diffusion schedules before training
-    plot_schedules(params)
+    analyze_diffusion_schedules(params)
     
     dataset = from_path(params)
     
