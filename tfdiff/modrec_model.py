@@ -3,6 +3,7 @@ from torch import nn
 import complex.complex_module as cm
 from .conditioning import ConditioningManager
 import math
+from tfdiff.memory_utils import track_memory, clear_memory
 
 def init_weight_norm(module):
     if isinstance(module, nn.Linear):
@@ -120,13 +121,15 @@ class PositionEmbedding(nn.Module):
         table = torch.view_as_real(torch.exp(1j * table))  # [P, E, 2]
         return table
 
+# In modrec_model.py, modify the DiA class:
+
 class DiA(nn.Module):
-    def __init__(self, hidden_dim, num_heads, dropout, mlp_ratio=4.0):
+    def __init__(self, hidden_dim, num_heads, dropout, mlp_ratio=4.0, chunk_size=128):
         super().__init__()
         self.norm1 = cm.NaiveComplexLayerNorm(
             hidden_dim, eps=1e-6, elementwise_affine=False)
         self.attn = cm.ComplexMultiHeadAttention(
-            hidden_dim, hidden_dim, num_heads, dropout, bias=True)
+            hidden_dim, hidden_dim, num_heads, dropout, chunk_size=chunk_size, bias=True)
         self.norm2 = cm.NaiveComplexLayerNorm(
             hidden_dim, eps=1e-6, elementwise_affine=False)
         mlp_hidden_dim = int(hidden_dim * mlp_ratio)
@@ -143,13 +146,25 @@ class DiA(nn.Module):
         self.adaLN_modulation.apply(init_weight_zero)
 
     def forward(self, x, c):
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaLN_modulation(
-            c).chunk(6, dim=1)
+        # Use gradient checkpointing for the heavy computations
+        if self.training:
+            return self._forward_with_checkpointing(x, c)
+        else:
+            return self._forward_impl(x, c)
+    
+    def _forward_impl(self, x, c):
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = \
+            self.adaLN_modulation(c).chunk(6, dim=1)
+        
         mod_x = modulate(self.norm1(x), shift_msa, scale_msa)
         x = x + gate_msa.unsqueeze(1) * self.attn(mod_x, mod_x, mod_x)
         x = x + gate_mlp.unsqueeze(1) * self.mlp(
             modulate(self.norm2(x), shift_mlp, scale_mlp))
         return x
+    
+    def _forward_with_checkpointing(self, x, c):
+        from torch.utils.checkpoint import checkpoint
+        return checkpoint(self._forward_impl, x, c)
 
 class FinalLayer(nn.Module):
     def __init__(self, hidden_dim, out_dim):
@@ -164,41 +179,56 @@ class FinalLayer(nn.Module):
         self.apply(init_weight_zero)
 
     def forward(self, x, c):
+        print("\n=== Final Layer Shapes ===")
+        print(f"Input x shape: {x.shape}")
+        
         shift, scale = self.adaLN_modulation(c).chunk(2, dim=1)
         x = modulate(self.norm(x), shift, scale)
-        x = self.linear(x)
+        
+        # Keep the sequence dimension
+        B, N, H, _ = x.shape
+        x_reshaped = x.reshape(B*N, H, 2)
+        x = self.linear(x_reshaped)
+        x = x.reshape(B, N, -1, 2)
+        
+        print(f"Output shape: {x.shape}")
         return x
 
 class tfdiff_ModRec(nn.Module):
     def __init__(self, params):
         super().__init__()
+        print("\n=== Initializing ModRec Model ===")
+        print(f"Input dim: {params.input_dim}")
+        print(f"Hidden dim: {params.hidden_dim}")
+        print(f"Target sequence length: {params.target_sequence_length}")
+        
         self.params = params
-        self.input_dim = params.input_dim  # Number of I/Q samples
+        self.input_dim = params.input_dim  
         self.hidden_dim = params.hidden_dim
         self.num_heads = params.num_heads
         
-        # Initialize conditioning manager
+        # Initialize conditioning manager first
         self.conditioning_manager = ConditioningManager(params)
         
         # Position embedding for sequence of I/Q samples
         self.p_embed = PositionEmbedding(
-            params.sample_rate,  # Sequence length
-            params.input_dim,    # Input dimension (1 for complex samples)
-            params.hidden_dim    # Hidden dimension
+            params.target_sequence_length,  # Use target length here
+            params.input_dim,    
+            params.hidden_dim    
         )
             
-        # Diffusion step embedding
         self.t_embed = DiffusionEmbedding(
             params.max_step,
             params.embed_dim,
             params.hidden_dim
         )
             
-        # Condition embedding with dynamic dimension
         self.c_embed = MLPConditionEmbedding(
-            self.conditioning_manager.conditioning_dim,  # Use dynamic conditioning dimension
+            self.conditioning_manager.conditioning_dim,
             params.hidden_dim
         )
+        
+        print(f"Conditioning dimension: {self.conditioning_manager.conditioning_dim}")
         
         # Attention blocks
         self.blocks = nn.ModuleList([
@@ -210,30 +240,38 @@ class tfdiff_ModRec(nn.Module):
             ) for _ in range(params.num_block)
         ])
         
-        # Final output layer
+        # Final layer goes back to input dimension
         self.final_layer = FinalLayer(
             self.hidden_dim,
-            self.input_dim
+            self.input_dim  # Output dimension should match input
         )
 
     def forward(self, x, t, c):
+        print("\n=== Model Forward Pass Start ===")
+        print(f"Input x shape: {x.shape}")
+        
         # Embed positions
         x = self.p_embed(x)
+        print(f"After position embedding: {x.shape}")
         
         # Embed diffusion timestep
         t = self.t_embed(t)
+        print(f"Timestep embedding: {t.shape}")
         
         # Embed conditioning info
         c = self.c_embed(c)
+        print(f"Condition embedding: {c.shape}")
         
         # Combine condition with diffusion step
         c = c + t
         
         # Process through attention blocks
-        for block in self.blocks:
+        for i, block in enumerate(self.blocks):
             x = block(x, c)
+            print(f"After block {i}: {x.shape}")
             
         # Generate final output
         x = self.final_layer(x, c)
+        print(f"Final output shape: {x.shape}")
         
         return x

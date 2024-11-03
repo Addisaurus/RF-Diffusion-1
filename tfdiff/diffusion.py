@@ -28,7 +28,7 @@ class SignalDiffusion(nn.Module):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.params = params
         self.task_id = params.task_id
-        self.input_dim = self.params.sample_rate # input time-series data length, N
+        self.input_dim = self.params.target_sequence_length # input time-series data length, N
         self.extra_dim = self.params.extra_dim # dimension of each data sample, e.g., [S A 2] for complex-valued CSI
         self.max_step = self.params.max_step # maximum diffusion steps
         beta = np.array(self.params.noise_schedule) # \beta, [T]
@@ -50,6 +50,10 @@ class SignalDiffusion(nn.Module):
         print("\n=== Diffusion Schedules ===")
         print(f"Noise schedule range: {min(params.noise_schedule):.6f} to {max(params.noise_schedule):.6f}")
         print(f"Blur schedule range: {min(params.blur_schedule):.6f} to {max(params.blur_schedule):.6f}")
+
+        print(f"\n=== Weight Shapes ===")
+        print(f"Noise weights shape: {self.noise_weights.shape}")
+        print(f"Info weights shape: {self.info_weights.shape}")
       
     def get_kernel(self, var_kernel):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -109,6 +113,7 @@ class SignalDiffusion(nn.Module):
     def degrade_fn(self, x_0, t, task_id):
         """Add noise to the input signal based on the task type"""
         device = x_0.device
+        batch_size, seq_len, _ = x_0.shape
         
         print("\n=== Starting degrade_fn ===")
         print(f"Input signal shape: {x_0.shape}")
@@ -116,20 +121,26 @@ class SignalDiffusion(nn.Module):
         print(f"Timestep t: {t}")
         print(f"Timestep device: {t.device}")
         
+        # Verify dimensions
+        if seq_len != self.input_dim:
+            raise ValueError(f"Input sequence length {seq_len} doesn't match target length {self.input_dim}")
+
         # Convert t to CPU for indexing
         t_cpu = t.cpu()
         
         # Get weights based on task type
         if task_id == 4:  # ModRec
-            # Move weights to the correct device before multiplication
-            noise_weight = self.noise_weights[t_cpu, :].unsqueeze(-1).to(device)
-            info_weight = self.info_weights[t_cpu, :].unsqueeze(-1).to(device)
+            # Ensure weights match sequence length
+            noise_weight = self.noise_weights[t_cpu, :seq_len].unsqueeze(-1).to(device)
+            info_weight = self.info_weights[t_cpu, :seq_len].unsqueeze(-1).to(device)
             
             print(f"Noise weight shape: {noise_weight.shape}")
             print(f"Info weight shape: {info_weight.shape}")
+            print(f"x_0 shape: {x_0.shape}")
         
         # Generate and apply noise
-        noise = noise_weight * torch.randn_like(x_0, dtype=torch.float32, device=device)
+        noise = torch.randn_like(x_0, dtype=torch.float32, device=device)
+        noise = noise_weight * noise  # Will broadcast across batch dimension
         x_t = info_weight * x_0 + noise
         
         print(f"Output shape: {x_t.shape}")

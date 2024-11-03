@@ -6,7 +6,7 @@ import wandb
 from tqdm import tqdm
 from tfdiff.diffusion import SignalDiffusion, GaussianDiffusion
 from tfdiff.dataset import _nested_map
-
+from tfdiff.memory_utils import track_memory, clear_memory
 
 class tfdiffLoss(nn.Module):
     def __init__(self, w=0.1):
@@ -126,38 +126,82 @@ class tfdiffLearner:
                     if self.is_master:
                         wandb.finish()
                     return
+                    
                 features = _nested_map(features, lambda x: x.to(
                     device) if isinstance(x, torch.Tensor) else x)
+                    
+                # Track full iteration memory
+                print(f"\n=== Iteration {self.iter} Memory ===")
                 loss = self.train_iter(features)
+                
                 if torch.isnan(loss).any():
                     raise RuntimeError(
                         f'Detected NaN loss at iteration {self.iter}.')
+                        
                 if self.is_master:
                     if self.iter % 50 == 0:
                         self._write_summary(self.iter, features, loss)
                     if self.iter % (len(self.dataset)) == 0:
                         self.save_to_checkpoint()
+                        
                 self.iter += 1
+                
+                # Clear memory between iterations
+                clear_memory()
+                
             self.lr_scheduler.step()
 
     def train_iter(self, features):
-        self.optimizer.zero_grad()
-        data = features['data']  # original data, x_0, [B, N, S*A, 2]
-        cond = features['cond']  # cond, c, [B, C]
-        B = data.shape[0]
-        # random diffusion step, [B]
-        t = torch.randint(0, self.diffusion.max_step, [B], dtype=torch.int64, device=self.device)
-        degrade_data = self.diffusion.degrade_fn(
-            data, t, self.task_id)  # degrade data, x_t, [B, N, S*A, 2]
-        predicted = self.model(degrade_data, t, cond)
-        if self.task_id==3:
-            data = data.reshape(-1,512,1,2)
-        loss = self.loss_fn(data, predicted)
-        loss.backward()
-        self.grad_norm = nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.params.max_grad_norm or 1e9)
-        self.optimizer.step()
-        return loss
+        with track_memory():
+            self.optimizer.zero_grad()
+            data = features['data']  # original data, x_0, [B, N, 2]
+            cond = features['cond']  # cond, c, [B, C]
+            B = data.shape[0]
+            
+            print("\n=== Training Iteration Shapes ===")
+            print(f"Original data shape: {data.shape}")
+            print(f"Condition shape: {cond.shape}")
+            
+            # random diffusion step, [B]
+            t = torch.randint(0, self.diffusion.max_step, [B], dtype=torch.int64, device=self.device)
+            print(f"Timesteps shape: {t.shape}")
+            
+            # Track memory during forward pass
+            print("\n=== Forward Pass Memory ===")
+            degrade_data = self.diffusion.degrade_fn(
+                data, t, self.task_id)  # degrade data, x_t, [B, N, 2]
+            print(f"Degraded data shape: {degrade_data.shape}")
+            
+            predicted = self.model(degrade_data, t, cond)
+            print(f"Model output shape: {predicted.shape}")
+            print(f"Target shape: {data.shape}")
+            
+            # Ensure target and prediction have same shape
+            if data.shape != predicted.shape:
+                # Remove extra dimensions from prediction if needed
+                if len(predicted.shape) == 4:
+                    predicted = predicted.squeeze(2)
+                print(f"Adjusted prediction shape: {predicted.shape}")
+            
+            # Verify shapes match
+            assert data.shape == predicted.shape, f"Shape mismatch: target {data.shape} vs prediction {predicted.shape}"
+            
+            loss = self.loss_fn(data, predicted)
+            print(f"Loss value: {loss.item()}")
+            
+            # Track memory during backward pass
+            print("\n=== Backward Pass Memory ===")
+            loss.backward()
+            
+            self.grad_norm = nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.params.max_grad_norm or 1e9)
+            
+            self.optimizer.step()
+            
+            # Clear memory after iteration
+            clear_memory()
+            
+            return loss
 
     def _write_summary(self, iter, features, loss):
         if not self.is_master:

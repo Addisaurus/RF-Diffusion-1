@@ -294,56 +294,107 @@ class Complex2Real(nn.Module):
         X = self.linear2(F.relu(X))
         return X.squeeze(dim=-1)
 
-
 class ComplexDotProductAttention(nn.Module):
-    """
-    Query shape: [batch_size, query_num, query_key_dim]
-    Key shape: [batch_size, key_value_num, query_key_dim]
-    Value shape: [batch_size, key_value_num, value_dim]
-    """
-    def __init__(self, dropout, **kwargs):
+    def __init__(self, dropout, chunk_size=128, **kwargs):
         super(ComplexDotProductAttention, self).__init__(**kwargs)
         self.dropout = ComplexDropout(dropout)
+        self.chunk_size = chunk_size
 
     def forward(self, queries, keys, values):
-        query_key_dim = queries.shape[-2]
-        self.attention_weights = complex_softmax(
-            complex_bmm(queries, keys.transpose(1, 2)) / math.sqrt(query_key_dim)
-        )
-        Y = complex_bmm(self.dropout(self.attention_weights), values)
-        return Y
+        device = queries.device
+        batch_size, seq_len, feat_dim, _ = queries.shape
+        value_dim = values.shape[2]
+        
+        print(f"\n=== Attention Dimensions ===")
+        print(f"Batch size: {batch_size}")
+        print(f"Sequence length: {seq_len}")
+        print(f"Feature dimension: {feat_dim}")
+        
+        # Pre-allocate output tensor
+        output = torch.zeros(batch_size, seq_len, value_dim, 2, device=device)
+        
+        # Process in chunks
+        for i in range(0, seq_len, self.chunk_size):
+            end_idx = min(i + self.chunk_size, seq_len)
+            chunk_size = end_idx - i
+            
+            # Get current chunks
+            q_chunk = queries[:, i:end_idx]
+            
+            # Compute attention scores for this chunk
+            scores = torch.zeros(batch_size, chunk_size, seq_len, 2, device=device)
+            
+            # Process key chunks to save memory
+            for j in range(0, seq_len, self.chunk_size):
+                k_end_idx = min(j + self.chunk_size, seq_len)
+                k_chunk = keys[:, j:k_end_idx]
+                
+                # Compute partial scores
+                chunk_score = complex_bmm(q_chunk, k_chunk.transpose(1, 2))
+                scores[:, :, j:k_end_idx] = chunk_score
+            
+            # Scale scores
+            scores = scores / math.sqrt(feat_dim)
+            
+            # Apply softmax and dropout
+            attention_weights = complex_softmax(scores)
+            attention_weights = self.dropout(attention_weights)
+            
+            # Compute weighted sum in chunks
+            chunk_output = torch.zeros(batch_size, chunk_size, value_dim, 2, device=device)
+            for j in range(0, seq_len, self.chunk_size):
+                k_end_idx = min(j + self.chunk_size, seq_len)
+                v_chunk = values[:, j:k_end_idx]
+                
+                # Get attention weights for this chunk
+                weight_chunk = attention_weights[:, :, j:k_end_idx]
+                
+                # Compute partial output
+                chunk_output += complex_bmm(weight_chunk, v_chunk)
+            
+            # Store chunk output
+            output[:, i:end_idx] = chunk_output
+            
+            # Clear memory
+            del scores, attention_weights, chunk_output
+            torch.cuda.empty_cache()
+        
+        return output
 
 
 class ComplexMultiHeadAttention(nn.Module):
-    def __init__(
-        self,
-        query_size,
-        num_hiddens,
-        num_heads,
-        dropout,
-        key_size=None,
-        value_size=None,
-        bias=False,
-        **kwargs
-    ):
-        super(ComplexMultiHeadAttention, self).__init__(**kwargs)
+    def __init__(self, query_size, num_hiddens, num_heads, dropout, chunk_size=128, 
+                 key_size=None, value_size=None, bias=False):
+        super().__init__()
         key_size = key_size or query_size
         value_size = value_size or query_size
         self.num_heads = num_heads
-        self.attention = ComplexDotProductAttention(dropout=dropout)
+        self.attention = ComplexDotProductAttention(dropout=dropout, chunk_size=chunk_size)
         self.w_q = ComplexLinear(query_size, num_hiddens, bias=bias)
         self.w_k = ComplexLinear(key_size, num_hiddens, bias=bias)
         self.w_v = ComplexLinear(value_size, num_hiddens, bias=bias)
         self.w_o = ComplexLinear(num_hiddens, num_hiddens, bias=bias)
 
     def forward(self, queries, keys, values):
+        # Save memory by using gradient checkpointing
+        if self.training:
+            return self._forward_with_checkpointing(queries, keys, values)
+        else:
+            return self._forward_impl(queries, keys, values)
+    
+    def _forward_impl(self, queries, keys, values):
         queries = transpose_qkv(self.w_q(queries), self.num_heads)
         keys = transpose_qkv(self.w_k(keys), self.num_heads)
         values = transpose_qkv(self.w_v(values), self.num_heads)
+        
         output = self.attention(queries, keys, values)
         output_concat = transpose_output(output, self.num_heads)
-        Y = self.w_o(output_concat)
-        return Y
+        return self.w_o(output_concat)
+    
+    def _forward_with_checkpointing(self, queries, keys, values):
+        # Use torch.utils.checkpoint to save memory during training
+        from torch.utils.checkpoint import checkpoint
+        return checkpoint(self._forward_impl, queries, keys, values)
 
 
 class ComplexPositionalEncoding(nn.Module):

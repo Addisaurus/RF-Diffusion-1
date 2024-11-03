@@ -11,6 +11,7 @@ import pandas as pd
 import struct
 import logging
 from .conditioning import ConditioningManager
+from tfdiff.transforms import resample_a_to_b
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,11 @@ class ModRecDataset(torch.utils.data.Dataset):
                 # Convert to complex
                 signal = rawdata[::2] + 1j * rawdata[1::2]
                 signal = torch.from_numpy(signal).to(torch.complex64)
+
+                # print(f"\n=== Signal Info ===\n")
+                # print(f"Raw data length: {len(rawdata)}")
+                # print(f"Complex signal length: {len(signal)}")
+                # print(f"Signal shape: {signal.shape}")
         except Exception as e:
             raise IOError(f"Error reading {filename}: {e}")
 
@@ -183,33 +189,63 @@ class EEGDataset(torch.utils.data.Dataset):
 class Collator:
     def __init__(self, params):
         self.params = params
-
+        self.target_length = params.target_sequence_length
+        print(f"\n=== Collator Configuration ===")
+        print(f"Original sample rate: {params.sample_rate}")
+        print(f"Target sequence length: {self.target_length}")
+        
     def collate(self, minibatch):
         sample_rate = self.params.sample_rate
         task_id = self.params.task_id
+        # Reduce sequence length to fit in memory
+        target_length = self.params.target_sequence_length  # Much smaller than 32768
 
         if task_id == 4:  # ModRec task
+            print(f"\n=== Collating Batch ===")
+            print(f"Initial batch size: {len(minibatch)}")
+            
+            resampled_batch = []
             for record in minibatch:
                 data = record['data']  # [N, 2]
-                # Ensure consistent length through downsampling/interpolation
-                if len(data) > sample_rate:
-                    down_sample = F.interpolate(
-                        data.permute(1, 0).unsqueeze(0),
-                        sample_rate, 
-                        mode='linear'
-                    )
-                    data = down_sample.squeeze(0).permute(1, 0)
+                print(f"Original data shape: {data.shape}")
+                
+                # Convert to complex numpy array for resampling
+                complex_data = data[:, 0] + 1j * data[:, 1]
+                
+                # Resample using scipy's high-quality resampler
+                target_length = self.target_length + 1  # Add 1 to match expected length
+                resampled = resample_a_to_b(
+                    complex_data, 
+                    a_fs=len(complex_data),
+                    b_fs=target_length
+                )
+                
+                # Trim to exact length if needed
+                resampled = resampled[:self.target_length]
+                
+                # Convert back to real/imag format
+                resampled_data = torch.stack([
+                    torch.from_numpy(resampled.real),
+                    torch.from_numpy(resampled.imag)
+                ], dim=-1).float()
+                
+                print(f"Resampled shape before norm: {resampled_data.shape}")
+                
                 # Normalize
-                norm_data = (data - data.mean()) / data.std()
-                record['data'] = norm_data
+                norm_data = (resampled_data - resampled_data.mean()) / resampled_data.std()
+                resampled_batch.append(norm_data)
 
             # Stack batch
-            data = torch.stack([record['data'] for record in minibatch])
+            data = torch.stack(resampled_batch)
             cond = torch.stack([record['cond'] for record in minibatch])
-                        
+            
+            print(f"Final batch shapes:")
+            print(f"Data: {data.shape}")   # Should be [B, target_length, 2]
+            print(f"Cond: {cond.shape}")  
+            
             return {
-                'data': data,  # [B, N, 2] 
-                'cond': cond  # [B, cond_dim, 2]
+                'data': data,
+                'cond': cond
             }
         ## WiFi Case
         elif task_id == 0:
