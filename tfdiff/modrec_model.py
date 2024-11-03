@@ -142,8 +142,14 @@ class DiA(nn.Module):
         self.use_checkpointing = True
         
     def forward(self, x, c):
+        # Replace checkpoint usage with explicit reentrant parameter
         if self.use_checkpointing and self.training:
-            return torch.utils.checkpoint.checkpoint(self._forward, x, c)
+            return torch.utils.checkpoint.checkpoint(
+                self._forward, 
+                x, 
+                c,
+                use_reentrant=False  # Add this parameter
+            )
         return self._forward(x, c)
         
     def _forward(self, x, c):

@@ -8,8 +8,13 @@ from typing import List, Dict, Optional, Any, Union
 import torch
 import numpy as np
 import logging
+import pickle
 
 logger = logging.getLogger(__name__)
+
+# conditioning.py
+from dataclasses import dataclass
+import pickle
 
 @dataclass
 class FieldConfig:
@@ -20,6 +25,17 @@ class FieldConfig:
     required: bool = True
     min_value: Optional[float] = None  # For continuous normalization
     max_value: Optional[float] = None  # For continuous normalization
+
+    def __reduce__(self):
+        """Enable pickling for multiprocessing"""
+        return (self.__class__, (
+            self.type,
+            self.values,
+            self.normalize,
+            self.required,
+            self.min_value,
+            self.max_value
+        ))
 
 class ConditioningManager:
     """Manages creation and validation of conditioning vectors"""
@@ -51,8 +67,17 @@ class ConditioningManager:
         self._validate_configuration()
         self.conditioning_dim = self._calculate_conditioning_dim()
         
-        logger.info(f"Initialized conditioning with fields: {self.enabled_fields}")
-        logger.info(f"Total conditioning dimension: {self.conditioning_dim}")
+    def __getstate__(self):
+        """Customize pickling behavior"""
+        return {
+            'enabled_fields': self.enabled_fields,
+            'field_configs': self.field_configs,
+            'conditioning_dim': self.conditioning_dim
+        }
+
+    def __setstate__(self, state):
+        """Customize unpickling behavior"""
+        self.__dict__.update(state)
 
     def _get_default_value(self, config: FieldConfig) -> float:
         """Get appropriate default value for a field configuration"""

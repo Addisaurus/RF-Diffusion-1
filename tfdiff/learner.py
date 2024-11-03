@@ -57,54 +57,49 @@ class tfdiffLearner:
 
         # Initialize wandb only on master process
         if self.is_master:
-            wandb.init(
-                project="RF-Diffusion",
-                config={
-                    "task_id": params.task_id,
-                    "batch_size": params.batch_size,
-                    "learning_rate": params.learning_rate,
-                    "model_type": type(model).__name__,
-                    "max_step": params.max_step,
-                    "sample_rate": params.sample_rate,
-                    "hidden_dim": params.hidden_dim,
-                    "num_heads": params.num_heads,
-                    "num_block": params.num_block,
-                    "dropout": params.dropout,
-                    "signal_diffusion": params.signal_diffusion,
-                },
-                name=f"task_{params.task_id}_{type(model).__name__}"
-            )
+            try:
+                run = wandb.init(
+                    project="RF-Diffusion",
+                    config={
+                        "task_id": params.task_id,
+                        "batch_size": params.batch_size,
+                        "learning_rate": params.learning_rate,
+                        "model_type": type(model).__name__,
+                        "max_step": params.max_step,
+                        "sample_rate": params.sample_rate,
+                        "hidden_dim": params.hidden_dim,
+                        "num_heads": params.num_heads,
+                        "num_block": params.num_block,
+                        "dropout": params.dropout,
+                        "signal_diffusion": params.signal_diffusion,
+                    },
+                    name=f"task_{params.task_id}_{type(model).__name__}"
+                )
 
-            # CUSTOM PANEL LAYOUT CODE
-            # Define custom chart layouts
-            wandb.define_metric("train/loss", summary="min")
-            wandb.define_metric("metrics/ssim", summary="max")
-            wandb.define_metric("metrics/fid", summary="min")
-            
-            # Create custom dashboard
-            wandb.run.log_config({
-                "layouts": {
-                    "Training Progress": {
-                        "Training Metrics": {
-                            "panel_type": "line",
-                            "panel_config": {
-                                "metrics": [
+                # Define custom chart layouts using the new API
+                wandb.define_metric("train/loss", summary="min")
+                wandb.define_metric("metrics/ssim", summary="max")
+                wandb.define_metric("metrics/fid", summary="min")
+                    
+                # Create custom dashboard layout
+                wandb.log({
+                    "custom_panels": {
+                        "Training Progress": {
+                            "Training Metrics": {
+                                "plot_type": "line",
+                                "keys": [
                                     "train/loss",
                                     "metrics/ssim_moving_avg",
                                     "metrics/fid_moving_avg"
                                 ]
-                            }
-                        },
-                        "Sample Visualizations": {
-                            "panel_type": "images",
-                            "panel_config": {
-                                "metrics": ["samples"]
-                            }
-                        },
-                        "System Metrics": {
-                            "panel_type": "line",
-                            "panel_config": {
-                                "metrics": [
+                            },
+                            "Sample Visualizations": {
+                                "plot_type": "images",
+                                "keys": ["samples"]
+                            },
+                            "System Metrics": {
+                                "plot_type": "line",
+                                "keys": [
                                     "system/gpu_utilization",
                                     "system/gpu_memory_allocated",
                                     "system/gpu_memory_reserved"
@@ -112,11 +107,23 @@ class tfdiffLearner:
                             }
                         }
                     }
+                })
+
+                # Try to log diagnostic images
+                diagnostic_paths = {
+                    'diffusion_schedules': os.path.join('diagnostics', 'diffusion_schedules.png'),
+                    'diffusion_progression': os.path.join('diagnostics', 'diffusion_progression.png')
                 }
-            })
-            
-            # Log model architecture
-            wandb.watch(model, log="all", log_freq=100)
+
+                for name, path in diagnostic_paths.items():
+                    if os.path.exists(path):
+                        wandb.log({f"diagnostics/{name}": wandb.Image(path)})
+
+                # Watch model with wandb
+                wandb.watch(model, log="all", log_freq=100)
+                
+            except Exception as e:
+                print(f"Warning: Non-critical wandb initialization error: {e}")
 
     def state_dict(self):
         if hasattr(self.model, 'module') and isinstance(self.model.module, nn.Module):
@@ -163,7 +170,10 @@ class tfdiffLearner:
 
     def restore_from_checkpoint(self, filename='weights'):
         try:
-            checkpoint = torch.load(f'{self.model_dir}/{filename}.pt')
+            checkpoint = torch.load(
+                f'{self.model_dir}/{filename}.pt',
+                weights_only=True  # Add this parameter
+            )
             self.load_state_dict(checkpoint)
             return True
         except FileNotFoundError:
@@ -203,7 +213,7 @@ class tfdiffLearner:
             self.lr_scheduler.step()
 
     def train_iter(self, features):
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda' if torch.cuda.is_available() else 'cpu'):
             with track_memory():
                 self.optimizer.zero_grad()
                 data = features['data']  # original data, x_0, [B, N, 2]

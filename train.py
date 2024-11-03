@@ -25,6 +25,7 @@ def _get_free_port():
 
 def analyze_diffusion_schedules(params):
     """Visualize noise and blur schedules"""
+    os.makedirs('diagnostics', exist_ok=True)
     plt.figure(figsize=(12, 6))
     
     # Handle both dictionary and object access
@@ -57,21 +58,24 @@ def analyze_diffusion_schedules(params):
     plt.legend()
     
     plt.tight_layout()
-    plt.savefig('diffusion_schedules.png')
+    save_path = os.path.join('diagnostics', 'diffusion_schedules.png')
+    plt.savefig(save_path)
     
     # Log to wandb if available
     if wandb.run is not None:
-        wandb.log({
-            "schedules/analysis": wandb.Image('diffusion_schedules.png'),
-            "schedules/blur_type": blur_type,
-            "schedules/noise_type": noise_type,
-            "schedules/blur_mean": np.mean(blur_schedule),
-            "schedules/noise_mean": np.mean(noise_schedule),
-            "schedules/blur_std": np.std(blur_schedule),
-            "schedules/noise_std": np.std(noise_schedule),
-        })
+        try:
+            wandb.log({
+                "schedules/analysis": wandb.Image(save_path),
+                "schedules/blur_type": blur_type,
+                "schedules/noise_type": noise_type,
+                "schedules/blur_mean": np.mean(blur_schedule),
+                "schedules/noise_std": np.std(noise_schedule),
+            })
+        except Exception as e:
+            print(f"Warning: Failed to log to wandb: {e}")
+    
     plt.close()
-
+    
 def evaluate_schedules(params, sample_data):
     """Evaluate diffusion schedules on sample data"""
     # Create diagnostics directory if it doesn't exist
@@ -161,6 +165,8 @@ def _train_impl(replica_id, model, dataset, params):
 
 def train(params):
     """Main training function with added diagnostics"""
+    # Create diagnostics directory at start
+    os.makedirs('diagnostics', exist_ok=True)
     # Plot diffusion schedules before training
     analyze_diffusion_schedules(params)
     

@@ -29,6 +29,11 @@ class ModRecDataset(torch.utils.data.Dataset):
     
     def __init__(self, paths, params):
         super().__init__()
+
+        # Store params we need instead of the whole params object
+        self.target_sequence_length = params.target_sequence_length
+        self.conditioning_manager = ConditioningManager(params)
+
         # Verify we have both data and metadata paths
         if len(paths) != 2:
             raise ValueError("ModRecDataset requires two paths: data directory and metadata file")
@@ -59,6 +64,15 @@ class ModRecDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return len(self.filenames)
+    
+    def __getstate__(self):
+        """Customize pickling behavior"""
+        state = self.__dict__.copy()
+        return state
+
+    def __setstate__(self, state):
+        """Customize unpickling behavior"""
+        self.__dict__.update(state)
 
     def __getitem__(self, idx):
         # Get signal file
@@ -326,28 +340,34 @@ class Collator:
 def from_path(params, is_distributed=False):
     data_dir = params.data_dir
     task_id = params.task_id
-    if task_id == 0:
-        dataset = WiFiDataset(data_dir)
-    elif task_id == 1:
-        dataset = FMCWDataset(data_dir)
-    elif task_id == 2:
-        dataset = MIMODataset(data_dir)
-    elif task_id == 3:
-        dataset = EEGDataset(data_dir)
-    elif task_id == 4:  # Add ModRec case
-        dataset = ModRecDataset(data_dir, params)
-    else:
-        raise ValueError("Unexpected task_id.")
-    return torch.utils.data.DataLoader(
-        dataset,
-        batch_size=params.batch_size,
-        collate_fn=Collator(params).collate,
-        shuffle=not is_distributed,
-        num_workers=8,
-        sampler=DistributedSampler(dataset) if is_distributed else None,
-        pin_memory=True,
-        drop_last=True,
-        persistent_workers=True)
+    try:
+        if task_id == 0:
+            dataset = WiFiDataset(data_dir)
+        elif task_id == 1:
+            dataset = FMCWDataset(data_dir)
+        elif task_id == 2:
+            dataset = MIMODataset(data_dir)
+        elif task_id == 3:
+            dataset = EEGDataset(data_dir)
+        elif task_id == 4:  # Add ModRec case
+            dataset = ModRecDataset(data_dir, params)
+        else:
+            raise ValueError("Unexpected task_id.")
+        # Start with fewer workers and no persistence for debugging
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=params.batch_size,
+            collate_fn=Collator(params).collate,
+            shuffle=not is_distributed,
+            num_workers=0,  # Start with 0 for debugging
+            sampler=DistributedSampler(dataset) if is_distributed else None,
+            pin_memory=True,
+            drop_last=True,
+            persistent_workers=False  # Disable for now
+        )
+    except Exception as e:
+        print(f"Error initializing dataset/dataloader: {str(e)}")
+        raise
 
 
 def from_path_inference(params):
