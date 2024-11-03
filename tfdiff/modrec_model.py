@@ -121,15 +121,13 @@ class PositionEmbedding(nn.Module):
         table = torch.view_as_real(torch.exp(1j * table))  # [P, E, 2]
         return table
 
-# In modrec_model.py, modify the DiA class:
-
 class DiA(nn.Module):
-    def __init__(self, hidden_dim, num_heads, dropout, mlp_ratio=4.0, chunk_size=128):
+    def __init__(self, hidden_dim, num_heads, dropout, mlp_ratio=4.0):
         super().__init__()
         self.norm1 = cm.NaiveComplexLayerNorm(
             hidden_dim, eps=1e-6, elementwise_affine=False)
         self.attn = cm.ComplexMultiHeadAttention(
-            hidden_dim, hidden_dim, num_heads, dropout, chunk_size=chunk_size, bias=True)
+            hidden_dim, hidden_dim, num_heads, dropout, bias=True)
         self.norm2 = cm.NaiveComplexLayerNorm(
             hidden_dim, eps=1e-6, elementwise_affine=False)
         mlp_hidden_dim = int(hidden_dim * mlp_ratio)
@@ -146,25 +144,26 @@ class DiA(nn.Module):
         self.adaLN_modulation.apply(init_weight_zero)
 
     def forward(self, x, c):
-        # Use gradient checkpointing for the heavy computations
-        if self.training:
-            return self._forward_with_checkpointing(x, c)
-        else:
-            return self._forward_impl(x, c)
-    
-    def _forward_impl(self, x, c):
+        print("\n=== DiA Layer ===")
+        print(f"Input shape: {x.shape}")
+        print(f"Condition shape: {c.shape}")
+        
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = \
             self.adaLN_modulation(c).chunk(6, dim=1)
         
+        # Modulate input for attention
         mod_x = modulate(self.norm1(x), shift_msa, scale_msa)
-        x = x + gate_msa.unsqueeze(1) * self.attn(mod_x, mod_x, mod_x)
-        x = x + gate_mlp.unsqueeze(1) * self.mlp(
-            modulate(self.norm2(x), shift_mlp, scale_mlp))
+        
+        # Apply attention
+        attn_out = self.attn(mod_x, mod_x, mod_x)
+        x = x + gate_msa.unsqueeze(1) * attn_out
+        
+        # Modulate for MLP
+        mod_x = modulate(self.norm2(x), shift_mlp, scale_mlp)
+        x = x + gate_mlp.unsqueeze(1) * self.mlp(mod_x)
+        
+        print(f"Output shape: {x.shape}")
         return x
-    
-    def _forward_with_checkpointing(self, x, c):
-        from torch.utils.checkpoint import checkpoint
-        return checkpoint(self._forward_impl, x, c)
 
 class FinalLayer(nn.Module):
     def __init__(self, hidden_dim, out_dim):

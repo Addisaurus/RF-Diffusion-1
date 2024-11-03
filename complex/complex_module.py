@@ -295,106 +295,94 @@ class Complex2Real(nn.Module):
         return X.squeeze(dim=-1)
 
 class ComplexDotProductAttention(nn.Module):
-    def __init__(self, dropout, chunk_size=128, **kwargs):
-        super(ComplexDotProductAttention, self).__init__(**kwargs)
+    def __init__(self, dropout, **kwargs):
+        super().__init__()
         self.dropout = ComplexDropout(dropout)
-        self.chunk_size = chunk_size
 
     def forward(self, queries, keys, values):
-        device = queries.device
-        batch_size, seq_len, feat_dim, _ = queries.shape
-        value_dim = values.shape[2]
+        batch_size, seq_len, feature_dim = queries.shape[:-1]
         
         print(f"\n=== Attention Dimensions ===")
         print(f"Batch size: {batch_size}")
         print(f"Sequence length: {seq_len}")
-        print(f"Feature dimension: {feat_dim}")
+        print(f"Feature dimension: {feature_dim}")
         
-        # Pre-allocate output tensor
-        output = torch.zeros(batch_size, seq_len, value_dim, 2, device=device)
+        # Compute attention scores
+        # (b, seq, d, 2) @ (b, d, seq, 2) -> (b, seq, seq, 2)
+        keys_t = keys.transpose(1, 2)
+        scores = complex_bmm(queries, keys_t) / math.sqrt(feature_dim)
         
-        # Process in chunks
-        for i in range(0, seq_len, self.chunk_size):
-            end_idx = min(i + self.chunk_size, seq_len)
-            chunk_size = end_idx - i
-            
-            # Get current chunks
-            q_chunk = queries[:, i:end_idx]
-            
-            # Compute attention scores for this chunk
-            scores = torch.zeros(batch_size, chunk_size, seq_len, 2, device=device)
-            
-            # Process key chunks to save memory
-            for j in range(0, seq_len, self.chunk_size):
-                k_end_idx = min(j + self.chunk_size, seq_len)
-                k_chunk = keys[:, j:k_end_idx]
-                
-                # Compute partial scores
-                chunk_score = complex_bmm(q_chunk, k_chunk.transpose(1, 2))
-                scores[:, :, j:k_end_idx] = chunk_score
-            
-            # Scale scores
-            scores = scores / math.sqrt(feat_dim)
-            
-            # Apply softmax and dropout
-            attention_weights = complex_softmax(scores)
-            attention_weights = self.dropout(attention_weights)
-            
-            # Compute weighted sum in chunks
-            chunk_output = torch.zeros(batch_size, chunk_size, value_dim, 2, device=device)
-            for j in range(0, seq_len, self.chunk_size):
-                k_end_idx = min(j + self.chunk_size, seq_len)
-                v_chunk = values[:, j:k_end_idx]
-                
-                # Get attention weights for this chunk
-                weight_chunk = attention_weights[:, :, j:k_end_idx]
-                
-                # Compute partial output
-                chunk_output += complex_bmm(weight_chunk, v_chunk)
-            
-            # Store chunk output
-            output[:, i:end_idx] = chunk_output
-            
-            # Clear memory
-            del scores, attention_weights, chunk_output
-            torch.cuda.empty_cache()
+        # Apply softmax and dropout
+        attention_weights = complex_softmax(scores)
+        attention_weights = self.dropout(attention_weights)
         
+        # Apply attention to values
+        output = complex_bmm(attention_weights, values)
+        
+        print(f"Attention output shape: {output.shape}")
         return output
 
 
 class ComplexMultiHeadAttention(nn.Module):
-    def __init__(self, query_size, num_hiddens, num_heads, dropout, chunk_size=128, 
-                 key_size=None, value_size=None, bias=False):
+    def __init__(self, query_size, num_hiddens, num_heads, dropout, key_size=None, 
+                 value_size=None, bias=False):
         super().__init__()
+        print(f"\n=== Initializing MultiHeadAttention ===")
+        print(f"Query size: {query_size}")
+        print(f"Num hiddens: {num_hiddens}")
+        print(f"Num heads: {num_heads}")
+        
         key_size = key_size or query_size
         value_size = value_size or query_size
         self.num_heads = num_heads
-        self.attention = ComplexDotProductAttention(dropout=dropout, chunk_size=chunk_size)
+        self.attention = ComplexDotProductAttention(dropout=dropout)
+        
+        # Hidden dim per head
+        self.hidden_per_head = num_hiddens // num_heads
+        assert self.hidden_per_head * num_heads == num_hiddens, \
+            "Hidden dimension must be divisible by number of heads"
+        
         self.w_q = ComplexLinear(query_size, num_hiddens, bias=bias)
         self.w_k = ComplexLinear(key_size, num_hiddens, bias=bias)
         self.w_v = ComplexLinear(value_size, num_hiddens, bias=bias)
         self.w_o = ComplexLinear(num_hiddens, num_hiddens, bias=bias)
 
     def forward(self, queries, keys, values):
-        # Save memory by using gradient checkpointing
-        if self.training:
-            return self._forward_with_checkpointing(queries, keys, values)
-        else:
-            return self._forward_impl(queries, keys, values)
-    
-    def _forward_impl(self, queries, keys, values):
-        queries = transpose_qkv(self.w_q(queries), self.num_heads)
-        keys = transpose_qkv(self.w_k(keys), self.num_heads)
-        values = transpose_qkv(self.w_v(values), self.num_heads)
+        batch_size, seq_len, _ = queries.shape[:-1]
         
+        print(f"\n=== MultiHeadAttention Forward ===")
+        print(f"Input shapes: Q={queries.shape}, K={keys.shape}, V={values.shape}")
+        
+        # Linear transformations
+        queries = self.w_q(queries)
+        keys = self.w_k(keys)
+        values = self.w_v(values)
+        
+        # Reshape for multi-head attention
+        def reshape_for_heads(x):
+            # From [batch, seq, hidden, 2] to [batch, seq, num_heads, hidden_per_head, 2]
+            x = x.reshape(batch_size, seq_len, self.num_heads, self.hidden_per_head, 2)
+            # to [batch*num_heads, seq, hidden_per_head, 2]
+            x = x.permute(0, 2, 1, 3, 4).reshape(-1, seq_len, self.hidden_per_head, 2)
+            return x
+        
+        # Transform all inputs
+        queries = reshape_for_heads(queries)
+        keys = reshape_for_heads(keys)
+        values = reshape_for_heads(values)
+        
+        # Apply attention
         output = self.attention(queries, keys, values)
-        output_concat = transpose_output(output, self.num_heads)
-        return self.w_o(output_concat)
-    
-    def _forward_with_checkpointing(self, queries, keys, values):
-        # Use torch.utils.checkpoint to save memory during training
-        from torch.utils.checkpoint import checkpoint
-        return checkpoint(self._forward_impl, queries, keys, values)
+        
+        # Reshape back
+        output = output.reshape(batch_size, self.num_heads, seq_len, self.hidden_per_head, 2)
+        output = output.permute(0, 2, 1, 3, 4).reshape(batch_size, seq_len, -1, 2)
+        
+        # Final linear transformation
+        output = self.w_o(output)
+        
+        print(f"Output shape: {output.shape}")
+        return output
 
 
 class ComplexPositionalEncoding(nn.Module):
