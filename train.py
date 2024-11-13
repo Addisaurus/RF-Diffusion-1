@@ -166,6 +166,13 @@ def _train_impl(replica_id, model, dataset, params):
 
 def train(params):
     """Main training function with added diagnostics"""
+    print("\n=== GPU Availability Check ===")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    if torch.cuda.is_available():
+        print(f"CUDA device count: {torch.cuda.device_count()}")
+        print(f"Current CUDA device: {torch.cuda.current_device()}")
+        print(f"Device name: {torch.cuda.get_device_name()}")
+        
     # Configure logging based on params
     configure_logging(params)
     # Create diagnostics directory at start

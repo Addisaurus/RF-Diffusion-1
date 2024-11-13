@@ -281,6 +281,10 @@ class FinalLayer(nn.Module):
 class tfdiff_ModRec(nn.Module):
     def __init__(self, params):
         super().__init__()
+        print("\n=== Model Device Check ===")
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {device}")
         # print("\n=== Initializing ModRec Model ===")
         # print(f"Input dim: {params.input_dim}")
         # print(f"Hidden dim: {params.hidden_dim}")

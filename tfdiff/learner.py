@@ -33,6 +33,15 @@ class tfdiffLoss(nn.Module):
 
 class tfdiffLearner:
     def __init__(self, log_dir, model_dir, model, dataset, optimizer, params, *args, **kwargs):
+        print("\n=== Learner Initialization Device Check ===")
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        if torch.cuda.is_available():
+            print(f"Device count: {torch.cuda.device_count()}")
+            print(f"Current device: {torch.cuda.current_device()}")
+            
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+        print(f"Using device: {self.device}")
         os.makedirs(log_dir, exist_ok=True)
         os.makedirs(model_dir, exist_ok=True)
         self.log_dir = str(log_dir)
@@ -147,7 +156,7 @@ class tfdiffLearner:
                     pickle.dumps(value)
                     params_dict[key] = value
                 except Exception as e:
-                    print(f"Warning: Could not serialize parameter {key}: {str(e)}")
+                    value_logger.debug(f"Warning: Could not serialize parameter {key}: {str(e)}")
                     # Convert problematic values to string representation
                     params_dict[key] = str(value)
                         
@@ -178,7 +187,7 @@ class tfdiffLearner:
         link_name = f'{self.model_dir}/{filename}.pt'
         
         try:
-            print("\n=== Saving Checkpoint ===")
+            value_logger.debug("\n=== Saving Checkpoint ===")
             state_dict = self.state_dict()
             
             #print("Model state keys:", list(state_dict['model'].keys()))
@@ -286,6 +295,11 @@ class tfdiffLearner:
             self.lr_scheduler.step()
 
     def train_iter(self, features):
+        print("\n=== Training Iteration Device Check ===")
+        print(f"Current device: {self.device}")
+        print(f"Model device: {next(self.model.parameters()).device}")
+        print(f"Input data device: {features['data'].device}")
+        
         with torch.amp.autocast('cuda' if torch.cuda.is_available() else 'cpu'):
             with track_memory():
                 self.optimizer.zero_grad()

@@ -2,16 +2,16 @@ task_id: 4
 log_dir: ./log/modrec
 model_dir: ./model #/modrec/debug-batch4-blocks4-tsl128
 data_dir:
-  #- C:\Users\acnut\Coding\csp_dataset
-  #- C:\Users\acnut\Coding\csp_dataset\signal_record_C_2023.txt
-  - C:\Users\acnut\Coding\csp_dataset_tiny
-  - C:\Users\acnut\Coding\csp_dataset_tiny\signal_record_C_2023.txt
+  - C:\Users\acnut\Coding\csp_dataset
+  - C:\Users\acnut\Coding\csp_dataset\signal_record_C_2023.txt
+  # - C:\Users\acnut\Coding\csp_dataset_tiny
+  # - C:\Users\acnut\Coding\csp_dataset_tiny\signal_record_C_2023.txt
 out_dir: ./dataset/modrec/output
 
 # Training params
 max_iter: null
-batch_size: 4 #4 #16 #32
-learning_rate: 1.0e-4  # Reduced from 1.0e-3
+batch_size: 64
+learning_rate: 1.0e-3 #1.0e-4  # Reduced from 1.0e-3
 max_grad_norm: 1.0  # Add explicit gradient clipping #null
 
 # Inference params
@@ -30,7 +30,7 @@ extra_dim: [1]
 embed_dim: 256
 hidden_dim: 256
 num_heads: 8
-num_block: 4  #32 # Fewer transformer blocks for quick debug
+num_block: 8 #4  #32 # Fewer transformer blocks for quick debug
 dropout: 0.1    # Add some dropout for regularization
 mlp_ratio: 4
 learn_tfdiff: False # WHAT HAPPENS IF TF DIFF IS FALSE???
@@ -81,16 +81,16 @@ max_step: 100 #300
 # Schedule configuration with independent types
 schedule_config:
   blur_schedule:
-    type: "cosine"  # Can be: "linear", "cosine", "exponential", "paper"
+    type: "exponential" #"cosine"  # Can be: "linear", "cosine", "exponential", "paper"
     start: 0.001
-    end: 0.2
+    end: 0.3 #.2
     paper_values: [0.001, 0.001, 0.002, 0.002, 0.005, 0.007, 0.01, 0.02,
                   0.03, 0.04, 0.05, 0.07, 0.1, 0.15, 0.2, 0.3]
     
   noise_schedule:
-    type: "exponential"  # Can be different from blur schedule
+    type: "exponential" #"exponential"  # Can be different from blur schedule
     start: 0.0001
-    end: 0.02
+    end: 0.03 #.02
     paper_values: [0.0001, 0.0001, 0.0002, 0.0002, 0.0005, 0.0007, 0.001, 0.002, 
                   0.003, 0.004, 0.005, 0.007, 0.01, 0.015, 0.02, 0.03]
 

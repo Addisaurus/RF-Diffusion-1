@@ -261,6 +261,7 @@ class Collator:
                 'data': data,
                 'cond': cond
             }
+        
         ## WiFi Case
         elif task_id == 0:
             for record in minibatch:
