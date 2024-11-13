@@ -29,25 +29,26 @@ class ModRecDataset(torch.utils.data.Dataset):
     
     def __init__(self, paths, params):
         super().__init__()
-
-        # Store params we need instead of the whole params object
-        self.target_sequence_length = params.target_sequence_length
-        self.conditioning_manager = ConditioningManager(params)
-
-        # Verify we have both data and metadata paths
         if len(paths) != 2:
             raise ValueError("ModRecDataset requires two paths: data directory and metadata file")
         
-        data_path = paths[0]  # Directory containing .tim files
-        metadata_file = paths[1]  # signal_record_C_2023.txt
+        # Store only essential parameters as simple Python types
+        self.target_sequence_length = int(params.target_sequence_length)
+        self.data_path = str(paths[0])
+        self.metadata_file = str(paths[1])
         
-        # Initialize conditioning manager
-        self.conditioning_manager = ConditioningManager(params)
-        logger.info(f"Initialized ModRecDataset with conditioning dim: {self.conditioning_manager.conditioning_dim}")
+        # Store conditioning configuration as simple dict
+        self.conditioning_config = {
+            'enabled_fields': list(params.conditioning.enabled_fields),
+            'field_configs': {
+                k: vars(v) if hasattr(v, '__dict__') else dict(v)
+                for k, v in params.conditioning.field_configs.items()
+            }
+        }
         
         # Load metadata
         self.metadata = pd.read_csv(
-            metadata_file, 
+            self.metadata_file, 
             sep='\s+',
             names=[
                 'id', 'modulation', 'symbol_period', 'carrier_offset',
@@ -55,24 +56,37 @@ class ModRecDataset(torch.utils.data.Dataset):
             ]
         )
         
-        # Get all .tim files
-        self.filenames = glob(f'{data_path}/**/signal_*.tim', recursive=True)
+        # Store filenames as list
+        self.filenames = list(glob(f'{self.data_path}/**/signal_*.tim', recursive=True))
         if not self.filenames:
-            raise RuntimeError(f"No .tim files found in {data_path}")
+            raise RuntimeError(f"No .tim files found in {self.data_path}")
         
-        logger.info(f"Found {len(self.filenames)} signal files")
+        # Create conditioning manager after storing config
+        self.conditioning_manager = self._create_conditioning_manager()
+        
+    def _create_conditioning_manager(self):
+        """Create new conditioning manager from stored config"""
+        params = AttrDict({'conditioning': AttrDict(self.conditioning_config)})
+        return ConditioningManager(params)
+        
+    def __getstate__(self):
+        """Define what gets pickled - only simple Python objects"""
+        return {
+            'target_sequence_length': self.target_sequence_length,
+            'data_path': self.data_path,
+            'metadata_file': self.metadata_file,
+            'conditioning_config': self.conditioning_config,
+            'metadata': self.metadata,
+            'filenames': self.filenames
+        }
+        
+    def __setstate__(self, state):
+        """Restore state and recreate manager"""
+        self.__dict__.update(state)
+        self.conditioning_manager = self._create_conditioning_manager()
 
     def __len__(self):
         return len(self.filenames)
-    
-    def __getstate__(self):
-        """Customize pickling behavior"""
-        state = self.__dict__.copy()
-        return state
-
-    def __setstate__(self, state):
-        """Customize unpickling behavior"""
-        self.__dict__.update(state)
 
     def __getitem__(self, idx):
         # Get signal file
@@ -202,17 +216,30 @@ class EEGDataset(torch.utils.data.Dataset):
 
 class Collator:
     def __init__(self, params):
-        self.params = params
-        self.target_length = params.target_sequence_length
-        # print(f"\n=== Collator Configuration ===")
-        # print(f"Original sample rate: {params.sample_rate}")
-        # print(f"Target sequence length: {self.target_length}")
+        # Store essential parameters as simple Python types
+        self.config = {
+            'sample_rate': int(params.sample_rate),
+            'task_id': int(params.task_id),
+            'target_sequence_length': int(params.target_sequence_length)
+        }
+        self.target_length = int(params.target_sequence_length)
         
+    def __getstate__(self):
+        """Define what gets pickled"""
+        return {
+            'config': self.config,
+            'target_length': self.target_length
+        }
+        
+    def __setstate__(self, state):
+        """Restore state"""
+        self.config = state['config']
+        self.target_length = state['target_length']
+
     def collate(self, minibatch):
-        sample_rate = self.params.sample_rate
-        task_id = self.params.task_id
-        # Reduce sequence length to fit in memory
-        target_length = self.params.target_sequence_length  # Much smaller than 32768
+        # Access parameters from config dict
+        sample_rate = self.config['sample_rate']
+        task_id = self.config['task_id']
 
         if task_id == 4:  # ModRec task
             # print(f"\n=== Collating Batch ===")
@@ -339,6 +366,7 @@ class Collator:
 
 
 def from_path(params, is_distributed=False):
+    print("Creating dataset...")
     data_dir = params.data_dir
     task_id = params.task_id
     try:
@@ -352,22 +380,41 @@ def from_path(params, is_distributed=False):
             dataset = EEGDataset(data_dir)
         elif task_id == 4:  # Add ModRec case
             dataset = ModRecDataset(data_dir, params)
+            print("Successfully created ModRecDataset")
         else:
             raise ValueError("Unexpected task_id.")
-        # Start with fewer workers and no persistence for debugging
-        return torch.utils.data.DataLoader(
+
+        print("Creating collator...")
+        collate_fn = Collator(params).collate
+        print("Successfully created collator")
+
+        print("Creating DataLoader...")
+        loader = torch.utils.data.DataLoader(
             dataset,
             batch_size=params.batch_size,
-            collate_fn=Collator(params).collate,
+            collate_fn=collate_fn,
             shuffle=not is_distributed,
-            num_workers=0,  # Start with 0 for debugging
+            num_workers=2,
             sampler=DistributedSampler(dataset) if is_distributed else None,
             pin_memory=True,
             drop_last=True,
-            persistent_workers=False  # Disable for now
+            persistent_workers=True,
+            multiprocessing_context='spawn'
         )
+        print("Successfully created DataLoader")
+        
+        # Test the first batch synchronously
+        print("Testing first batch...")
+        test_iter = iter(loader)
+        test_batch = next(test_iter)
+        print("Successfully loaded first batch")
+        
+        return loader
+
     except Exception as e:
-        print(f"Error initializing dataset/dataloader: {str(e)}")
+        print(f"Error in from_path: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise
 
 

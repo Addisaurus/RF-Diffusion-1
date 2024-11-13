@@ -295,11 +295,11 @@ class tfdiffLearner:
             self.lr_scheduler.step()
 
     def train_iter(self, features):
-        print("\n=== Training Iteration Device Check ===")
-        print(f"Current device: {self.device}")
-        print(f"Model device: {next(self.model.parameters()).device}")
-        print(f"Input data device: {features['data'].device}")
-        
+        # print("\n=== Training Iteration Device Check ===")
+        # print(f"Current device: {self.device}")
+        # print(f"Model device: {next(self.model.parameters()).device}")
+        # print(f"Input data device: {features['data'].device}")
+
         with torch.amp.autocast('cuda' if torch.cuda.is_available() else 'cpu'):
             with track_memory():
                 self.optimizer.zero_grad()

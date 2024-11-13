@@ -77,6 +77,40 @@ def analyze_diffusion_schedules(params):
     
     plt.close()
     
+def test_dataset_pickle(params):
+    """Test if dataset can be pickled/unpickled"""
+    import pickle
+    from tfdiff.dataset import ModRecDataset
+    print("\n=== Testing Dataset Pickling ===")
+    
+    try:
+        # Create dataset
+        print("Creating dataset...")
+        dataset = ModRecDataset(params.data_dir, params)
+        print("Created dataset successfully")
+        
+        # Try to pickle
+        print("Testing dataset pickle...")
+        pickled = pickle.dumps(dataset)
+        print(f"Successfully pickled dataset: {len(pickled)} bytes")
+        
+        # Try to unpickle
+        print("Testing dataset unpickle...")
+        unpickled = pickle.loads(pickled)
+        print("Successfully unpickled dataset")
+        
+        # Try to load an item
+        print("Testing item load...")
+        item = unpickled[0]
+        print("Successfully loaded item")
+        print("\nPickle test passed!")
+        
+    except Exception as e:
+        print(f"\nPickle test failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise
+
 def evaluate_schedules(params, sample_data):
     """Evaluate diffusion schedules on sample data"""
     # Create diagnostics directory if it doesn't exist
@@ -169,9 +203,13 @@ def train(params):
     print("\n=== GPU Availability Check ===")
     print(f"CUDA available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
-        print(f"CUDA device count: {torch.cuda.device_count()}")
-        print(f"Current CUDA device: {torch.cuda.current_device()}")
+    #     print(f"CUDA device count: {torch.cuda.device_count()}")
+    #     print(f"Current CUDA device: {torch.cuda.current_device()}")
         print(f"Device name: {torch.cuda.get_device_name()}")
+
+    # Add the pickle test before creating the dataset
+    if params.task_id == 4:  # Only run for ModRec task
+        test_dataset_pickle(params)    
         
     # Configure logging based on params
     configure_logging(params)
