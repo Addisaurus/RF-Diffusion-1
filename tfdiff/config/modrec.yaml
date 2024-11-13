@@ -1,6 +1,6 @@
 task_id: 4
 log_dir: ./log/modrec
-model_dir: ./model/modrec/flexible-cond
+model_dir: ./model/modrec/debug-4-h
 data_dir:
   - C:\Users\acnut\Coding\csp_dataset
   - C:\Users\acnut\Coding\csp_dataset\signal_record_C_2023.txt
@@ -9,8 +9,8 @@ out_dir: ./dataset/modrec/output
 # Training params
 max_iter: 10 #null
 batch_size: 4 #16 #32
-learning_rate: 1.0e-3 #-3
-max_grad_norm: null
+learning_rate: 1.0e-4  # Reduced from 1.0e-3
+max_grad_norm: 1.0  # Add explicit gradient clipping #null
 
 # Inference params
 inference_batch_size: 1
@@ -29,7 +29,7 @@ embed_dim: 256
 hidden_dim: 256
 num_heads: 8
 num_block: 4  #32 # Fewer transformer blocks for quick debug
-dropout: 0.0
+dropout: 0.1    # Add some dropout for regularization
 mlp_ratio: 4
 learn_tfdiff: False # WHAT HAPPENS IF TF DIFF IS FALSE???
 

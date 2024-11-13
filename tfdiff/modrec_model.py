@@ -41,7 +41,16 @@ def modulate(x, shift, scale):
         shift = shift.expand_as(x)
         scale = scale.expand_as(x)
     
-    return x * (1 + scale) + shift
+    # Clamp scale to prevent explosion
+    scale = torch.clamp(scale, -5.0, 5.0)
+    
+    # Add numerical stability
+    x = torch.nan_to_num(x, nan=0.0)
+    result = x * (1 + scale) + shift
+    
+    # Final safety check
+    result = torch.nan_to_num(result, nan=0.0)
+    return result
 
 class DiffusionEmbedding(nn.Module):
     def __init__(self, max_step, embed_dim=256, hidden_dim=256):
@@ -219,6 +228,7 @@ class FinalLayer(nn.Module):
     def forward(self, x, c):
         print("\n=== Final Layer Processing ===")
         print(f"Input shapes - x:{x.shape}, c:{c.shape}")
+        print(f"Initial input stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}")
         
         batch_size, seq_len, hidden_dim, _ = x.shape
         
@@ -228,10 +238,16 @@ class FinalLayer(nn.Module):
         shift = shift.unsqueeze(1).expand(-1, seq_len, -1, -1)
         scale = scale.unsqueeze(1).expand(-1, seq_len, -1, -1)
         
-        # Apply normalization and modulation
-        x = modulate(self.norm(x), shift, scale)
+        print(f"Modulation stats - shift: [{shift.min().item():.4f}, {shift.max().item():.4f}], scale: [{scale.min().item():.4f}, {scale.max().item():.4f}]")
         
-        # Apply linear layer while preserving batch and sequence dimensions
+        # Apply layer norm and modulation
+        x = self.norm(x)
+        print(f"After norm stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}")
+        
+        x = modulate(x, shift, scale)
+        print(f"After modulation stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}")
+        
+        # Apply linear layer
         x = x.reshape(batch_size * seq_len, hidden_dim, 2)
         x = self.linear(x)  # [B*seq_len, out_dim, 2]
         x = x.reshape(batch_size, seq_len, -1, 2)  # [B, seq_len, out_dim, 2]
@@ -239,27 +255,36 @@ class FinalLayer(nn.Module):
         # Remove extra dimension if out_dim is 1
         if x.shape[2] == 1:
             x = x.squeeze(2)  # [B, seq_len, 2]
-            
+                
+        print(f"After linear stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}")
         
-        # Normalize output to match input range
-        x_mean = x.mean()
-        x_std = x.std()
-        x = (x - x_mean) / (x_std + 1e-8)  # Add small epsilon for stability
-
-        # Get original data range for scaling
-        x_min = x.min()
-        x_max = x.max()
-        target_min = -4.0  # Based on observed input range
+        # Define target range
+        target_min = -4.0
         target_max = 4.0
+        target_range = target_max - target_min
         
-        # Scale to target range
-        x = (x - x_min) / (x_max - x_min + 1e-8)  # [0, 1]
-        x = x * (target_max - target_min) + target_min  # [target_min, target_max]
+        # Use a safe normalization approach
+        x_std = torch.std(x)
+        if x_std < 1e-8:  # If std is too small
+            x_std = torch.ones_like(x_std)
+            
+        x_mean = torch.mean(x)
+        x = (x - x_mean) / (x_std + 1e-8)
         
-        print(f"\n=== Final Layer Output Stats ===")
-        print(f"Mean: {x_mean.item():.4f}, Std: {x_std.item():.4f}")
-        print(f"Output range: [{x.min().item():.4f}, {x.max().item():.4f}]")
+        # Scale to target range using tanh
+        x = torch.tanh(x) * (target_range/2.0)  # tanh output is [-1, 1], so multiply by half the range
+        # Center at target midpoint
+        x = x + (target_max + target_min)/2.0
+        
+        print(f"Final output stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}, mean: {x.mean().item():.4f}, std: {x.std().item():.4f}")
         print(f"Output shape: {x.shape}")
+        
+        # Add final sanity check
+        if not torch.isfinite(x).all():
+            print("WARNING: Non-finite values in output!")
+            # Replace NaN/inf with finite values
+            x = torch.nan_to_num(x, nan=0.0, posinf=target_max, neginf=target_min)
+            
         return x
 
 class tfdiff_ModRec(nn.Module):
