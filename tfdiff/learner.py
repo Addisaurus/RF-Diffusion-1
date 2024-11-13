@@ -58,6 +58,14 @@ class tfdiffLearner:
         # Initialize wandb only on master process
         if self.is_master:
             try:
+                # Generate a more descriptive run name
+                run_name = f"{type(model).__name__}_b{params.batch_size}_h{params.hidden_dim}_s{params.target_sequence_length}_nh{params.num_heads}_nb{params.num_block}"
+                
+                # Add timestamp for uniqueness
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%m%d_%H%M")
+                run_name = f"{run_name}_{timestamp}"
+
                 run = wandb.init(
                     project="RF-Diffusion",
                     config={
@@ -73,7 +81,7 @@ class tfdiffLearner:
                         "dropout": params.dropout,
                         "signal_diffusion": params.signal_diffusion,
                     },
-                    name=f"task_{params.task_id}_{type(model).__name__}"
+                    name=run_name
                 )
 
                 # Define custom chart layouts using the new API
@@ -82,32 +90,25 @@ class tfdiffLearner:
                 wandb.define_metric("metrics/fid", summary="min")
                     
                 # Create custom dashboard layout
-                wandb.log({
-                    "custom_panels": {
-                        "Training Progress": {
-                            "Training Metrics": {
-                                "plot_type": "line",
-                                "keys": [
-                                    "train/loss",
-                                    "metrics/ssim_moving_avg",
-                                    "metrics/fid_moving_avg"
-                                ]
-                            },
-                            "Sample Visualizations": {
-                                "plot_type": "images",
-                                "keys": ["samples"]
-                            },
-                            "System Metrics": {
-                                "plot_type": "line",
-                                "keys": [
-                                    "system/gpu_utilization",
-                                    "system/gpu_memory_allocated",
-                                    "system/gpu_memory_reserved"
-                                ]
-                            }
+                wandb.run.log_artifact(
+                    wandb.Artifact(
+                        "dashboard", type="run_config",
+                        metadata={
+                            "views": [
+                                {
+                                    "panel_type": "line",
+                                    "panel_title": "Training Metrics",
+                                    "fields": ["train/loss", "metrics/ssim", "metrics/fid"]
+                                },
+                                {
+                                    "panel_type": "image",
+                                    "panel_title": "Samples",
+                                    "fields": ["samples"]
+                                }
+                            ]
                         }
-                    }
-                })
+                    )
+                )
 
                 # Try to log diagnostic images
                 diagnostic_paths = {
@@ -121,21 +122,92 @@ class tfdiffLearner:
 
                 # Watch model with wandb
                 wandb.watch(model, log="all", log_freq=100)
-                
+
             except Exception as e:
                 print(f"Warning: Non-critical wandb initialization error: {e}")
 
     def state_dict(self):
+        """Get state dict with proper parameter serialization"""
         if hasattr(self.model, 'module') and isinstance(self.model.module, nn.Module):
             model_state = self.model.module.state_dict()
         else:
             model_state = self.model.state_dict()
+            
+        # Convert params to serializable format
+        params_dict = {}
+        for key, value in vars(self.params).items():
+            # Skip private attributes
+            if not key.startswith('_'):
+                # Handle different types of values
+                if isinstance(value, (int, float, str, bool, list, dict)):
+                    params_dict[key] = value
+                elif isinstance(value, torch.Tensor):
+                    params_dict[key] = value.cpu().tolist()
+                elif value is None:
+                    params_dict[key] = None
+                else:
+                    # Convert other objects to string representation
+                    params_dict[key] = str(value)
+                    
         return {
             'iter': self.iter,
-            'model': {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in model_state.items()},
-            'optimizer': {k: v.cpu() if isinstance(v, torch.Tensor) else v for k, v in self.optimizer.state_dict().items()},
-            'params': dict(self.params),
+            'model': {k: v.cpu() if isinstance(v, torch.Tensor) else v 
+                    for k, v in model_state.items()},
+            'optimizer': {k: v.cpu() if isinstance(v, torch.Tensor) else v 
+                        for k, v in self.optimizer.state_dict().items()},
+            'params': params_dict,  # Use our serializable params dict
         }
+
+    def save_to_checkpoint(self, filename='weights'):
+        """Save checkpoint with error handling"""
+        save_basename = f'{filename}-{self.iter}.pt'
+        save_name = f'{self.model_dir}/{save_basename}'
+        link_name = f'{self.model_dir}/{filename}.pt'
+        
+        try:
+            print("\n=== Saving Checkpoint ===")
+            state_dict = self.state_dict()
+            
+            print("Model state keys:", list(state_dict['model'].keys()))
+            print("Optimizer state keys:", list(state_dict['optimizer'].keys()))
+            print("Params keys:", list(state_dict['params'].keys()))
+            
+            # Check for any None values in critical places
+            for k, v in state_dict['model'].items():
+                if v is None:
+                    print(f"Warning: None value found in model state for key: {k}")
+                    
+            for k, v in state_dict['optimizer'].items():
+                if v is None:
+                    print(f"Warning: None value found in optimizer state for key: {k}")
+
+            torch.save(state_dict, save_name)
+            
+            # Log model checkpoint as artifact if using wandb
+            if self.is_master and hasattr(self, 'wandb'):
+                artifact = wandb.Artifact(
+                    name=f"model-checkpoint-{self.iter}", 
+                    type="model",
+                    description=f"Model checkpoint at iteration {self.iter}"
+                )
+                artifact.add_file(save_name)
+                wandb.log_artifact(artifact)
+                    
+            # Create symlink on Unix or copy on Windows
+            if os.name == 'nt':
+                torch.save(state_dict, link_name)
+            else:
+                if os.path.islink(link_name):
+                    os.unlink(link_name)
+                os.symlink(save_basename, link_name)
+                    
+        except Exception as e:
+            print(f"Error saving checkpoint: {str(e)}")
+            if 'state_dict' in locals():
+                print("State dict top-level keys:", state_dict.keys())
+                print("Model structure:", type(self.model))
+                print("Optimizer structure:", type(self.optimizer))
+                raise
 
     def load_state_dict(self, state_dict):
         if hasattr(self.model, 'module') and isinstance(self.model.module, nn.Module):
@@ -144,29 +216,6 @@ class tfdiffLearner:
             self.model.load_state_dict(state_dict['model'])
         self.optimizer.load_state_dict(state_dict['optimizer'])
         self.iter = state_dict['iter']
-
-    def save_to_checkpoint(self, filename='weights'):
-        save_basename = f'{filename}-{self.iter}.pt'
-        save_name = f'{self.model_dir}/{save_basename}'
-        link_name = f'{self.model_dir}/{filename}.pt'
-        torch.save(self.state_dict(), save_name)
-        
-        # Log model checkpoint as artifact
-        if self.is_master:
-            artifact = wandb.Artifact(
-                name=f"model-checkpoint-{self.iter}", 
-                type="model",
-                description=f"Model checkpoint at iteration {self.iter}"
-            )
-            artifact.add_file(save_name)
-            wandb.log_artifact(artifact)
-            
-        if os.name == 'nt':
-            torch.save(self.state_dict(), link_name)
-        else:
-            if os.path.islink(link_name):
-                os.unlink(link_name)
-            os.symlink(save_basename, link_name)
 
     def restore_from_checkpoint(self, filename='weights'):
         try:
@@ -181,6 +230,10 @@ class tfdiffLearner:
 
     def train(self, max_iter=None):
         device = self.device
+        # Enable torch backends
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
         while True:  # epoch
             for features in tqdm(self.dataset, desc=f'Epoch {self.iter // len(self.dataset)}') if self.is_master else self.dataset:
                 if max_iter is not None and self.iter >= max_iter:
@@ -224,44 +277,55 @@ class tfdiffLearner:
                 
                 B = data.shape[0]
                 
-                # print("\n=== Training Iteration Shapes ===")
-                # print(f"Original data shape: {data.shape}")
-                # print(f"Condition shape: {cond.shape}")
+                print(f"\n=== Training Iteration ===")
+                print(f"Input data shape: {data.shape}")  # original signal
+                print(f"Input condition shape: {cond.shape}")  # condition
+                
+                # Scale data to match model output range
+                data_min, data_max = data.min(), data.max()
+                scaled_data = (data - data_min) / (data_max - data_min + 1e-8)
+                scaled_data = scaled_data * 8.0 - 4.0  # Scale to [-4, 4]
+                print(f"Data ranges - Original:[{data_min:.4f}, {data_max:.4f}], Scaled:[{scaled_data.min():.4f}, {scaled_data.max():.4f}]")
                 
                 # random diffusion step, [B]
                 t = torch.randint(0, self.diffusion.max_step, [B], dtype=torch.int64, device=self.device)
-                # print(f"Timesteps shape: {t.shape}")
+                print(f"Timestep shape: {t.shape}")  # diffusion timestep
                 
-                # Track memory during forward pass
-                # print("\n=== Forward Pass Memory ===")
-                degrade_data = self.diffusion.degrade_fn(
-                    data, t, self.task_id)  # degrade data, x_t, [B, N, 2]
-                # print(f"Degraded data shape: {degrade_data.shape}")
-                
+                # Forward pass with degradation
+                degrade_data = self.diffusion.degrade_fn(scaled_data, t, self.task_id)
                 predicted = self.model(degrade_data, t, cond)
-                # print(f"Model output shape: {predicted.shape}")
-                # print(f"Target shape: {data.shape}")
                 
-                # Ensure target and prediction have same shape
-                if data.shape != predicted.shape:
-                    # Remove extra dimensions from prediction if needed
+                # Enhanced shape validation and adjustment
+                if scaled_data.shape != predicted.shape:
                     if len(predicted.shape) == 4:
                         predicted = predicted.squeeze(2)
                     print(f"Adjusted prediction shape: {predicted.shape}")
+                    
+                # Verify shapes match with detailed error message
+                if scaled_data.shape != predicted.shape:
+                    raise ValueError(
+                        f"Shape mismatch after adjustment:\n"
+                        f"Target shape: {scaled_data.shape}\n"
+                        f"Prediction shape: {predicted.shape}\n"
+                        f"Raw model output had shape: {predicted.shape if 'predicted' in locals() else 'N/A'}"
+                    )
                 
-                # Verify shapes match
-                assert data.shape == predicted.shape, f"Shape mismatch: target {data.shape} vs prediction {predicted.shape}"
-                
-                loss = self.loss_fn(data, predicted)
+                # Compute loss on scaled data
+                loss = self.loss_fn(scaled_data, predicted)
                 print(f"Loss value: {loss.item()}")
+                print(f"Prediction range: [{predicted.min():.4f}, {predicted.max():.4f}]")
                 
                 # Track memory during backward pass
-                # print("\n=== Backward Pass Memory ===")
                 loss.backward()
                 
+                # Gradient clipping
                 self.grad_norm = nn.utils.clip_grad_norm_(
                     self.model.parameters(), self.params.max_grad_norm or 1e9)
                 
+                # After gradient clipping
+                print(f"Gradient norm: {self.grad_norm:.4f}")
+
+                # Optimizer step
                 self.optimizer.step()
                 
                 # Clear memory after iteration
@@ -270,19 +334,29 @@ class tfdiffLearner:
                 return loss
 
     def _compute_metrics(self, real_data, generated_data):
-        """Compute FID and SSIM metrics"""
+        """Compute metrics with more detailed debugging"""
         with torch.no_grad():
-            # Move tensors to CPU to avoid additional GPU memory usage
-            real_cpu = real_data.cpu()
-            generated_cpu = generated_data.cpu()
+            # real_cpu = real_data.cpu()
+            # generated_cpu = generated_data.cpu()
+            print("\n=== Computing Metrics ===")
+            print(f"Real data shape: {real_data.shape}, dtype: {real_data.dtype}")
+            print(f"Generated data shape: {generated_data.shape}, dtype: {generated_data.dtype}")
             
-            # Calculate SSIM
-            ssim = self.rf_metrics.complex_ssim(real_cpu, generated_cpu)
-            
-            # Calculate FID
-            fid = self.rf_metrics.rf_fid(real_cpu, generated_cpu)
-            
-            return ssim.item(), fid
+            try:
+                # Calculate SSIM directly on GPU
+                ssim = self.rf_metrics.complex_ssim(real_data, generated_data)
+                print(f"SSIM computed successfully: {ssim.item()}")
+                
+                # Calculate FID
+                fid = self.rf_metrics.rf_fid(real_data, generated_data)
+                print(f"FID computed successfully: {fid}")
+                
+                return ssim.item(), fid
+            except Exception as e:
+                print(f"Error computing metrics: {str(e)}")
+                print(f"Real data range: [{real_data.min()}, {real_data.max()}]")
+                print(f"Generated data range: [{generated_data.min()}, {generated_data.max()}]")
+                raise
 
     def _write_summary(self, iter, features, loss):
         if not self.is_master:

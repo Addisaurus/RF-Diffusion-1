@@ -57,11 +57,16 @@ def complex_mul(X, Y):
 
 @torch.jit.script
 def complex_bmm(X, Y):
-    X_r, X_i = [x.squeeze(dim=-1) for x in torch.split(X, 1, dim=-1)]
+    #print(f"complex_bmm input shapes: X:{X.shape}, Y:{Y.shape}")
+    """Ensure consistent ordering in batched matrix multiply"""
+    X_r, X_i = [x.squeeze(dim=-1) for x in torch.split(X, 1, dim=-1)]  # Real and imaginary parts
     Y_r, Y_i = [y.squeeze(dim=-1) for y in torch.split(Y, 1, dim=-1)]
-    Z_r = torch.bmm(X_r, Y_r) - torch.bmm(X_i, Y_i)
+    
+    # Maintain consistent dimension order
+    Z_r = torch.bmm(X_r, Y_r) - torch.bmm(X_i, Y_i)  
     Z_i = torch.bmm(X_r, Y_i) + torch.bmm(X_i, Y_r)
-    return torch.stack((Z_r, Z_i), dim=-1)
+    
+    return torch.stack((Z_r, Z_i), dim=-1)  # Return [batch, out_dim1, out_dim2, 2]
 
 @torch.jit.script
 def complex_softmax(X):
@@ -295,15 +300,18 @@ class Complex2Real(nn.Module):
         return X.squeeze(dim=-1)
 
 class ComplexDotProductAttention(nn.Module):
-    def __init__(self, dropout, chunk_size=128, **kwargs):
+    def __init__(self, dropout, chunk_size=32):
         super().__init__()
         self.dropout = ComplexDropout(dropout)
         self.chunk_size = chunk_size
 
     def forward(self, queries, keys, values):
+        print(f"\n=== DotProductAttention Input Shapes ===")
+        print(f"Q:{queries.shape}, K:{keys.shape}, V:{values.shape}")
+        
         batch_size, seq_len, feature_dim = queries.shape[:-1]
         
-        # Initialize output tensor
+        # Always maintain consistent ordering of dimensions
         output = torch.zeros_like(values)
         
         # Process sequence in chunks
@@ -311,71 +319,59 @@ class ComplexDotProductAttention(nn.Module):
             chunk_end = min(chunk_start + self.chunk_size, seq_len)
             
             # Get current chunk of queries
-            q_chunk = queries[:, chunk_start:chunk_end]
+            q_chunk = queries[:, chunk_start:chunk_end]  # [batch, chunk, feature, 2]
+            k_trans = keys.transpose(1, 2)  # [batch, feature, seq, 2]
             
-            # Calculate attention scores for this chunk
-            scores = complex_bmm(q_chunk, keys.transpose(1, 2)) / math.sqrt(feature_dim)
+            # Calculate attention scores 
+            scores = complex_bmm(q_chunk, k_trans) / math.sqrt(feature_dim)  
             
-            # Apply softmax and dropout
-            attention_weights = complex_softmax(scores)
+            # Apply softmax and dropout - maintain shape consistency
+            attention_weights = complex_softmax(scores)  
             attention_weights = self.dropout(attention_weights)
             
-            # Apply attention to values
-            chunk_output = complex_bmm(attention_weights, values)
+            # Apply attention to values - enforce consistent ordering
+            chunk_output = complex_bmm(attention_weights, values)  
             
             # Store chunk output
             output[:, chunk_start:chunk_end] = chunk_output
             
-            # Force GPU memory clearing after each chunk
-            torch.cuda.empty_cache()
-        
         return output
 
-
 class ComplexMultiHeadAttention(nn.Module):
-    def __init__(self, query_size, num_hiddens, num_heads, dropout, key_size=None, 
-                 value_size=None, bias=False):
+    def __init__(self, query_size, hidden_dim, num_heads, dropout, key_size=None, 
+                 value_size=None, bias=False, chunk_size=32):  # Add chunk_size parameter
         super().__init__()
-        # print(f"\n=== Initializing MultiHeadAttention ===")
-        # print(f"Query size: {query_size}")
-        # print(f"Num hiddens: {num_hiddens}")
-        # print(f"Num heads: {num_heads}")
-        
         key_size = key_size or query_size
         value_size = value_size or query_size
-        self.num_heads = num_heads
-        self.attention = ComplexDotProductAttention(dropout=dropout)
         
-        # Hidden dim per head
-        self.hidden_per_head = num_hiddens // num_heads
-        assert self.hidden_per_head * num_heads == num_hiddens, \
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.attention = ComplexDotProductAttention(dropout=dropout, chunk_size=chunk_size)
+        
+        self.hidden_per_head = hidden_dim // num_heads
+        assert self.hidden_per_head * num_heads == hidden_dim, \
             "Hidden dimension must be divisible by number of heads"
         
-        self.w_q = ComplexLinear(query_size, num_hiddens, bias=bias)
-        self.w_k = ComplexLinear(key_size, num_hiddens, bias=bias)
-        self.w_v = ComplexLinear(value_size, num_hiddens, bias=bias)
-        self.w_o = ComplexLinear(num_hiddens, num_hiddens, bias=bias)
+        self.w_q = ComplexLinear(query_size, hidden_dim, bias=bias)
+        self.w_k = ComplexLinear(key_size, hidden_dim, bias=bias)
+        self.w_v = ComplexLinear(value_size, hidden_dim, bias=bias)
+        self.w_o = ComplexLinear(hidden_dim, hidden_dim, bias=bias)
 
     def forward(self, queries, keys, values):
-        batch_size, seq_len, _ = queries.shape[:-1]
+        batch_size, seq_len = queries.shape[:2]
         
-        # print(f"\n=== MultiHeadAttention Forward ===")
-        # print(f"Input shapes: Q={queries.shape}, K={keys.shape}, V={values.shape}")
+        # Linear transformations with consistent shape ordering
+        queries = self.w_q(queries)  # [batch, seq, hidden, 2]
+        keys = self.w_k(keys)        # [batch, seq, hidden, 2]
+        values = self.w_v(values)    # [batch, seq, hidden, 2]
         
-        # Linear transformations
-        queries = self.w_q(queries)
-        keys = self.w_k(keys)
-        values = self.w_v(values)
-        
-        # Reshape for multi-head attention
         def reshape_for_heads(x):
-            # From [batch, seq, hidden, 2] to [batch, seq, num_heads, hidden_per_head, 2]
-            x = x.reshape(batch_size, seq_len, self.num_heads, self.hidden_per_head, 2)
-            # to [batch*num_heads, seq, hidden_per_head, 2]
-            x = x.permute(0, 2, 1, 3, 4).reshape(-1, seq_len, self.hidden_per_head, 2)
-            return x
+            # Maintain consistent dimension ordering throughout
+            return (x.reshape(batch_size, seq_len, self.num_heads, self.hidden_per_head, 2)
+                    .permute(0, 2, 1, 3, 4)  # [batch, heads, seq, head_dim, 2]
+                    .reshape(batch_size * self.num_heads, seq_len, self.hidden_per_head, 2))
         
-        # Transform all inputs
+        # Reshape maintaining dimension order
         queries = reshape_for_heads(queries)
         keys = reshape_for_heads(keys)
         values = reshape_for_heads(values)
@@ -383,14 +379,14 @@ class ComplexMultiHeadAttention(nn.Module):
         # Apply attention
         output = self.attention(queries, keys, values)
         
-        # Reshape back
-        output = output.reshape(batch_size, self.num_heads, seq_len, self.hidden_per_head, 2)
-        output = output.permute(0, 2, 1, 3, 4).reshape(batch_size, seq_len, -1, 2)
+        # Reshape back with consistent ordering
+        output = (output.reshape(batch_size, self.num_heads, seq_len, self.hidden_per_head, 2)
+                 .permute(0, 2, 1, 3, 4)  # [batch, seq, heads, head_dim, 2]
+                 .reshape(batch_size, seq_len, self.hidden_dim, 2))
         
         # Final linear transformation
         output = self.w_o(output)
         
-        # print(f"Output shape: {output.shape}")
         return output
 
 
