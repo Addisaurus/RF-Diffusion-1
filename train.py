@@ -16,6 +16,7 @@ from tfdiff.learner import tfdiffLearner
 from tfdiff.dataset import from_path
 from tfdiff.params import load_config, override_from_args
 from tfdiff.diffusion import SignalDiffusion, GaussianDiffusion
+from tfdiff.debug_utils import configure_logging
 import wandb
 
 def _get_free_port():
@@ -165,6 +166,8 @@ def _train_impl(replica_id, model, dataset, params):
 
 def train(params):
     """Main training function with added diagnostics"""
+    # Configure logging based on params
+    configure_logging(params)
     # Create diagnostics directory at start
     os.makedirs('diagnostics', exist_ok=True)
     # Plot diffusion schedules before training

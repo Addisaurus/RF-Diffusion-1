@@ -1,14 +1,16 @@
 task_id: 4
 log_dir: ./log/modrec
-model_dir: ./model/modrec/debug-4-h
+model_dir: ./model #/modrec/debug-batch4-blocks4-tsl128
 data_dir:
-  - C:\Users\acnut\Coding\csp_dataset
-  - C:\Users\acnut\Coding\csp_dataset\signal_record_C_2023.txt
+  #- C:\Users\acnut\Coding\csp_dataset
+  #- C:\Users\acnut\Coding\csp_dataset\signal_record_C_2023.txt
+  - C:\Users\acnut\Coding\csp_dataset_tiny
+  - C:\Users\acnut\Coding\csp_dataset_tiny\signal_record_C_2023.txt
 out_dir: ./dataset/modrec/output
 
 # Training params
-max_iter: 10 #null
-batch_size: 4 #16 #32
+max_iter: null
+batch_size: 4 #4 #16 #32
 learning_rate: 1.0e-4  # Reduced from 1.0e-3
 max_grad_norm: 1.0  # Add explicit gradient clipping #null
 
@@ -18,7 +20,7 @@ robust_sampling: true
 
 # Data params
 sample_rate: 32768          # Original signal sampling rate
-target_sequence_length: 128 #512 #2048 # Length we'll downsample to for the model
+target_sequence_length: 128 #128 #512 #2048 # Length we'll downsample to for the model
 # Parameter for attention chunking
 chunk_size: 32 #32 #128  # Process sequences in chunks of 128
 input_dim: 1
@@ -93,5 +95,21 @@ schedule_config:
                   0.003, 0.004, 0.005, 0.007, 0.01, 0.015, 0.02, 0.03]
 
 # These will be computed by the schedule generator
-blur_schedule: null
-noise_schedule: null
+# blur_schedule: null
+# noise_schedule: null
+
+
+# Add these lines to modrec.yaml (keep all your existing config)
+debug_config:
+  # Control debug output for tensor shapes, dimensions, and structural info
+  shape_debug: false
+  # Control debug output for numerical values, statistics, gradients etc
+  value_debug: false
+  # Log level for non-debug messages
+  log_level: "INFO"
+  # Enable debugging for specific modules
+  debug_modules:
+    model: false
+    metrics: false
+    complex: false
+    memory: false

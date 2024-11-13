@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
+from tfdiff.debug_utils import shape_logger, value_logger
 
 class RFMetrics:
     """Metrics specifically designed for RF signals with improved accuracy and stability"""
@@ -116,11 +117,11 @@ class RFMetrics:
         if not x1.is_cuda and torch.cuda.is_available():
             print("Warning: Input tensors are on CPU but CUDA is available. Consider keeping tensors on GPU for better performance.")
 
-        print("\n=== Complex SSIM Debug ===")
-        print(f"Input x1 shape: {x1.shape}, dtype: {x1.dtype}, device: {x1.device}")
-        print(f"Input x2 shape: {x2.shape}, dtype: {x2.dtype}, device: {x2.device}")
-        print(f"x1 contiguous: {x1.is_contiguous()}")
-        print(f"x1 values first element: {x1[0,0]}")
+        shape_logger.debug("\n=== Complex SSIM Debug ===")
+        shape_logger.debug(f"Input x1 shape: {x1.shape}, dtype: {x1.dtype}, device: {x1.device}")
+        shape_logger.debug(f"Input x2 shape: {x2.shape}, dtype: {x2.dtype}, device: {x2.device}")
+        shape_logger.debug(f"x1 contiguous: {x1.is_contiguous()}")
+        shape_logger.debug(f"x1 values first element: {x1[0,0]}")
 
         # Validate inputs
         RFMetrics.validate_input(x1, "x1")
@@ -130,7 +131,7 @@ class RFMetrics:
         x1_complex = torch.view_as_complex(x1.contiguous())
         x2_complex = torch.view_as_complex(x2.contiguous())
 
-        print(f"Complex tensor shapes - x1:{x1_complex.shape}, x2:{x2_complex.shape}")
+        shape_logger.debug(f"Complex tensor shapes - x1:{x1_complex.shape}, x2:{x2_complex.shape}")
         
         # Calculate in time domain
         ssim_time = RFMetrics._compute_complex_ssim(
@@ -202,8 +203,8 @@ class RFMetrics:
         if gen_features.dim() == 1:
             gen_features = gen_features.unsqueeze(0)
             
-        print(f"\n=== FID Computation Debug ===")
-        print(f"Feature shapes - Real:{real_features.shape}, Gen:{gen_features.shape}")
+        shape_logger.debug(f"\n=== FID Computation Debug ===")
+        shape_logger.debug(f"Feature shapes - Real:{real_features.shape}, Gen:{gen_features.shape}")
         
         # Normalize features
         real_features = (real_features - real_features.mean(0)) / (real_features.std(0) + 1e-8)
@@ -214,7 +215,7 @@ class RFMetrics:
         sigma1 = torch.cov(real_features.permute(1, 0))  # [feature_dim, batch_size]
         sigma2 = torch.cov(gen_features.permute(1, 0))
         
-        print(f"Covariance shapes - Sigma1:{sigma1.shape}, Sigma2:{sigma2.shape}")
+        shape_logger.debug(f"Covariance shapes - Sigma1:{sigma1.shape}, Sigma2:{sigma2.shape}")
         
         # Calculate FID with improved numerical stability
         diff = mu1 - mu2

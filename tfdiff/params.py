@@ -85,10 +85,42 @@ all_params = [
     params_modrec
 ]
 
-# Add CLI override capability
+def generate_model_dir(params):
+    """Generate model directory name from hyperparameters"""
+    
+    # List of important hyperparameters and their shorthand codes
+    param_codes = [
+        ('batch', params.batch_size),
+        ('seq', params.target_sequence_length),
+        ('h', params.hidden_dim),
+        ('head', params.num_heads),
+        ('blk', params.num_block),
+        ('step', params.max_step),
+    ]
+    
+    # Create directory name
+    dir_parts = [f"{code}{val}" for code, val in param_codes]
+    model_name = '-'.join(dir_parts)
+        
+    # Get base directory from config or use default
+    base_dir = getattr(params, 'model_dir', './model')
+    if not isinstance(base_dir, str):
+        base_dir = './model'
+        
+    # Construct full path including task
+    task_names = ['wifi', 'fmcw', 'mimo', 'eeg', 'modrec']
+    task_name = task_names[params.task_id]
+    
+    return os.path.join(base_dir, task_name, model_name)
+
 def override_from_args(params, args):
     """Override params with command line arguments"""
     for key, value in vars(args).items():
         if value is not None and hasattr(params, key):
             setattr(params, key, value)
+    
+    # Generate model directory name if not explicitly overridden
+    if not args.model_dir:
+        params.model_dir = generate_model_dir(params)
+        
     return params

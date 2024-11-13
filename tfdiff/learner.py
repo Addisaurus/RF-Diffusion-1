@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import sys
 import torch
 import torch.nn as nn
 import wandb
@@ -9,6 +10,7 @@ from tfdiff.dataset import _nested_map
 from tfdiff.memory_utils import track_memory, clear_memory
 from tfdiff.rf_metrics import RFMetrics
 import matplotlib.pyplot as plt
+from tfdiff.debug_utils import shape_logger, value_logger
 
 class tfdiffLoss(nn.Module):
     def __init__(self, w=0.1):
@@ -31,10 +33,11 @@ class tfdiffLoss(nn.Module):
 
 class tfdiffLearner:
     def __init__(self, log_dir, model_dir, model, dataset, optimizer, params, *args, **kwargs):
+        os.makedirs(log_dir, exist_ok=True)
         os.makedirs(model_dir, exist_ok=True)
-        self.model_dir = model_dir
+        self.log_dir = str(log_dir)
+        self.model_dir = str(model_dir)
         self.task_id = params.task_id
-        self.log_dir = log_dir
         self.model = model
         self.dataset = dataset
         self.optimizer = optimizer
@@ -132,31 +135,41 @@ class tfdiffLearner:
             model_state = self.model.module.state_dict()
         else:
             model_state = self.model.state_dict()
-            
-        # Convert params to serializable format
+                
+        # Convert params to serializable format - more conservative approach
         params_dict = {}
         for key, value in vars(self.params).items():
-            # Skip private attributes
+            # Skip private attributes and non-serializable types
             if not key.startswith('_'):
-                # Handle different types of values
-                if isinstance(value, (int, float, str, bool, list, dict)):
+                try:
+                    # Test if value is pickleable
+                    import pickle
+                    pickle.dumps(value)
                     params_dict[key] = value
-                elif isinstance(value, torch.Tensor):
-                    params_dict[key] = value.cpu().tolist()
-                elif value is None:
-                    params_dict[key] = None
-                else:
-                    # Convert other objects to string representation
+                except Exception as e:
+                    print(f"Warning: Could not serialize parameter {key}: {str(e)}")
+                    # Convert problematic values to string representation
                     params_dict[key] = str(value)
-                    
-        return {
+                        
+        state = {
             'iter': self.iter,
-            'model': {k: v.cpu() if isinstance(v, torch.Tensor) else v 
-                    for k, v in model_state.items()},
-            'optimizer': {k: v.cpu() if isinstance(v, torch.Tensor) else v 
-                        for k, v in self.optimizer.state_dict().items()},
-            'params': params_dict,  # Use our serializable params dict
+            'model': model_state,
+            'optimizer': self.optimizer.state_dict(),
+            'params': params_dict,
         }
+        
+        # Verify each component is serializable
+        try:
+            #print("\n=== Verifying State Dict Components ===")
+            for key, value in state.items():
+                #print(f"Testing {key}...")
+                pickle.dumps(value)
+            #print("All components verified serializable")
+        except Exception as e:
+            print(f"Serialization test failed for {key}: {str(e)}")
+            raise
+            
+        return state
 
     def save_to_checkpoint(self, filename='weights'):
         """Save checkpoint with error handling"""
@@ -168,9 +181,9 @@ class tfdiffLearner:
             print("\n=== Saving Checkpoint ===")
             state_dict = self.state_dict()
             
-            print("Model state keys:", list(state_dict['model'].keys()))
-            print("Optimizer state keys:", list(state_dict['optimizer'].keys()))
-            print("Params keys:", list(state_dict['params'].keys()))
+            #print("Model state keys:", list(state_dict['model'].keys()))
+            #print("Optimizer state keys:", list(state_dict['optimizer'].keys()))
+            #print("Params keys:", list(state_dict['params'].keys()))
             
             # Check for any None values in critical places
             for k, v in state_dict['model'].items():
@@ -235,23 +248,32 @@ class tfdiffLearner:
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
         while True:  # epoch
-            for features in tqdm(self.dataset, desc=f'Epoch {self.iter // len(self.dataset)}') if self.is_master else self.dataset:
+            # Create progress bar
+            pbar = (tqdm(self.dataset,
+                        desc=f'Epoch {self.iter // len(self.dataset)}',
+                        dynamic_ncols=True,
+                        leave=True,
+                        position=0,
+                        ncols=80,
+                        bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]'
+                        ) if self.is_master else self.dataset)
+            
+            for features in pbar:
                 if max_iter is not None and self.iter >= max_iter:
                     if self.is_master:
                         wandb.finish()
                     return
                     
-                features = _nested_map(features, lambda x: x.to(
-                    device) if isinstance(x, torch.Tensor) else x)
-                    
-                # Track full iteration memory
-                # print(f"\n=== Iteration {self.iter} Memory ===")
+                features = _nested_map(features, lambda x: x.to(device) if isinstance(x, torch.Tensor) else x)
                 loss = self.train_iter(features)
                 
                 if torch.isnan(loss).any():
-                    raise RuntimeError(
-                        f'Detected NaN loss at iteration {self.iter}.')
-                        
+                    raise RuntimeError(f'Detected NaN loss at iteration {self.iter}.')
+                    
+                # Update progress bar with loss
+                if self.is_master:
+                    pbar.set_postfix({'loss': f'{loss.item():.4f}'}, refresh=False)
+                    
                 if self.is_master:
                     if self.iter % 50 == 0:
                         self._write_summary(self.iter, features, loss)
@@ -259,8 +281,6 @@ class tfdiffLearner:
                         self.save_to_checkpoint()
                         
                 self.iter += 1
-                
-                # Clear memory between iterations
                 clear_memory()
                 
             self.lr_scheduler.step()
@@ -272,24 +292,30 @@ class tfdiffLearner:
                 data = features['data']  # original data, x_0, [B, N, 2]
                 cond = features['cond']  # cond, c, [B, C]
                 
+                # Scale learning rate based on gradient norm
+                if hasattr(self, 'grad_norm') and self.grad_norm is not None:
+                    if self.grad_norm > 1.0:
+                        for param_group in self.optimizer.param_groups:
+                            param_group['lr'] *= 0.9
+
                 # Clear cache before forward pass
                 torch.cuda.empty_cache()
                 
                 B = data.shape[0]
                 
-                print(f"\n=== Training Iteration ===")
-                print(f"Input data shape: {data.shape}")  # original signal
-                print(f"Input condition shape: {cond.shape}")  # condition
+                value_logger.debug(f"\n=== Training Iteration ===")
+                shape_logger.debug(f"Input data shape: {data.shape}")  # original signal
+                shape_logger.debug(f"Input condition shape: {cond.shape}")  # condition
                 
                 # Scale data to match model output range
                 data_min, data_max = data.min(), data.max()
                 scaled_data = (data - data_min) / (data_max - data_min + 1e-8)
                 scaled_data = scaled_data * 8.0 - 4.0  # Scale to [-4, 4]
-                print(f"Data ranges - Original:[{data_min:.4f}, {data_max:.4f}], Scaled:[{scaled_data.min():.4f}, {scaled_data.max():.4f}]")
+                value_logger.debug(f"Data ranges - Original:[{data_min:.4f}, {data_max:.4f}], Scaled:[{scaled_data.min():.4f}, {scaled_data.max():.4f}]")
                 
                 # random diffusion step, [B]
                 t = torch.randint(0, self.diffusion.max_step, [B], dtype=torch.int64, device=self.device)
-                print(f"Timestep shape: {t.shape}")  # diffusion timestep
+                shape_logger.debug(f"Timestep shape: {t.shape}")  # diffusion timestep
                 
                 # Forward pass with degradation
                 degrade_data = self.diffusion.degrade_fn(scaled_data, t, self.task_id)
@@ -299,7 +325,7 @@ class tfdiffLearner:
                 if scaled_data.shape != predicted.shape:
                     if len(predicted.shape) == 4:
                         predicted = predicted.squeeze(2)
-                    print(f"Adjusted prediction shape: {predicted.shape}")
+                    shape_logger.debug(f"Adjusted prediction shape: {predicted.shape}")
                     
                 # Verify shapes match with detailed error message
                 if scaled_data.shape != predicted.shape:
@@ -312,21 +338,27 @@ class tfdiffLearner:
                 
                 # Compute loss on scaled data
                 loss = self.loss_fn(scaled_data, predicted)
-                print(f"Loss value: {loss.item()}")
-                print(f"Prediction range: [{predicted.min():.4f}, {predicted.max():.4f}]")
+                #print(f"Loss value: {loss.item()}")
+                value_logger.debug(f"Prediction range: [{predicted.min():.4f}, {predicted.max():.4f}]")
                 
                 # Track memory during backward pass
                 loss.backward()
                 
-                # Gradient clipping
-                self.grad_norm = nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.params.max_grad_norm or 1e9)
+                # More aggressive gradient clipping
+                self.grad_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), 
+                    max_norm=0.5,  # Reduced from 1.0
+                    error_if_nonfinite=False  # Don't error on NaNs
+                )
                 
                 # After gradient clipping
-                print(f"Gradient norm: {self.grad_norm:.4f}")
+                value_logger.debug(f"Gradient norm: {self.grad_norm:.4f}")
 
-                # Optimizer step
-                self.optimizer.step()
+                # Skip step if gradients are NaN
+                if not torch.isnan(self.grad_norm):
+                    self.optimizer.step()
+                else:
+                    print("WARNING: Skipping optimization step due to NaN gradients")
                 
                 # Clear memory after iteration
                 clear_memory()
@@ -338,9 +370,9 @@ class tfdiffLearner:
         with torch.no_grad():
             # real_cpu = real_data.cpu()
             # generated_cpu = generated_data.cpu()
-            print("\n=== Computing Metrics ===")
-            print(f"Real data shape: {real_data.shape}, dtype: {real_data.dtype}")
-            print(f"Generated data shape: {generated_data.shape}, dtype: {generated_data.dtype}")
+            shape_logger.debug("\n=== Computing Metrics ===")
+            shape_logger.debug(f"Real data shape: {real_data.shape}, dtype: {real_data.dtype}")
+            shape_logger.debug(f"Generated data shape: {generated_data.shape}, dtype: {generated_data.dtype}")
             
             try:
                 # Calculate SSIM directly on GPU

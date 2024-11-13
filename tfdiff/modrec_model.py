@@ -4,6 +4,7 @@ import complex.complex_module as cm
 from .conditioning import ConditioningManager
 import math
 from tfdiff.memory_utils import track_memory, clear_memory
+from tfdiff.debug_utils import shape_logger, value_logger
 
 def init_weight_norm(module):
     if isinstance(module, nn.Linear):
@@ -166,24 +167,24 @@ class DiA(nn.Module):
         self.use_checkpointing = False  # Temporarily disable for debugging
 
     def _forward(self, x, c):
-        print(f"\n=== DiA Layer Processing ===")
-        print(f"Input x: {x.shape}")
-        print(f"Input c: {c.shape}")
+        shape_logger.debug(f"\n=== DiA Layer Processing ===")
+        shape_logger.debug(f"Input x: {x.shape}")
+        shape_logger.debug(f"Input c: {c.shape}")
         
         batch_size, seq_len, hidden_dim, _ = x.shape
         
         # Ensure condition has proper shape before modulation
         if len(c.shape) == 3:  # [B, H, 2]
             c = c.unsqueeze(1).expand(-1, seq_len, -1, -1)  # [B, seq_len, H, 2]
-        print(f"Expanded condition: {c.shape}")
+        shape_logger.debug(f"Expanded condition: {c.shape}")
         
         # Get modulation parameters
         modulation = self.adaLN_modulation(c)
-        print(f"Modulation output: {modulation.shape}")
+        shape_logger.debug(f"Modulation output: {modulation.shape}")
         
         chunks = modulation.chunk(6, dim=2)
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = chunks
-        print(f"Modulation chunks: {shift_msa.shape}")
+        shape_logger.debug(f"Modulation chunks: {shift_msa.shape}")
         
         # Pre-normalize inputs
         normed_x = self.norm1(x)
@@ -193,7 +194,7 @@ class DiA(nn.Module):
         
         # Apply attention with consistent shapes
         attn_out = self.attn(mod_x, mod_x, mod_x)
-        print(f"Attention output shape: {attn_out.shape}")
+        shape_logger.debug(f"Attention output shape: {attn_out.shape}")
         x = x + gate_msa * attn_out
         
         # MLP path with consistent shapes
@@ -226,64 +227,54 @@ class FinalLayer(nn.Module):
         self.apply(init_weight_zero)
 
     def forward(self, x, c):
-        print("\n=== Final Layer Processing ===")
-        print(f"Input shapes - x:{x.shape}, c:{c.shape}")
-        print(f"Initial input stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}")
+        value_logger.debug("\n=== Final Layer Processing ===")
+        shape_logger.debug(f"Final Layer Input shapes - x:{x.shape}, c:{c.shape}")
+        value_logger.debug(f"Initial input stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}")
         
+        # Early stabilization
+        x = torch.nan_to_num(x, nan=0.0, posinf=1e3, neginf=-1e3)
+
         batch_size, seq_len, hidden_dim, _ = x.shape
         
         # Get modulation parameters and expand
         modulation = self.adaLN_modulation(c)  # [B, 2*hidden_dim, 2]
         shift, scale = modulation.chunk(2, dim=1)  # Each is [B, hidden_dim, 2]
+
+        # Clamp modulation parameters
+        scale = torch.clamp(scale, -2.0, 2.0)
+        shift = torch.clamp(shift, -2.0, 2.0)
+
         shift = shift.unsqueeze(1).expand(-1, seq_len, -1, -1)
         scale = scale.unsqueeze(1).expand(-1, seq_len, -1, -1)
         
-        print(f"Modulation stats - shift: [{shift.min().item():.4f}, {shift.max().item():.4f}], scale: [{scale.min().item():.4f}, {scale.max().item():.4f}]")
+        value_logger.debug(f"Modulation stats - shift: [{shift.min().item():.4f}, {shift.max().item():.4f}], scale: [{scale.min().item():.4f}, {scale.max().item():.4f}]")
         
-        # Apply layer norm and modulation
-        x = self.norm(x)
-        print(f"After norm stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}")
+        # Apply norm with gradient clipping
+        with torch.no_grad():
+            x_normed = self.norm(x.detach())
+            if torch.isnan(x_normed).any():
+                print("WARNING: NaN detected in normalization")
+                x = x / (torch.std(x) + 1e-5)
+            else:
+                x = self.norm(x)
         
-        x = modulate(x, shift, scale)
-        print(f"After modulation stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}")
+        # Apply modulation with bounded output
+        x = x * (1 + scale) + shift
+        x = torch.clamp(x, -10.0, 10.0)
         
-        # Apply linear layer
+        # Reshape and apply linear layer
         x = x.reshape(batch_size * seq_len, hidden_dim, 2)
-        x = self.linear(x)  # [B*seq_len, out_dim, 2]
-        x = x.reshape(batch_size, seq_len, -1, 2)  # [B, seq_len, out_dim, 2]
+        x = self.linear(x)
+        x = x.reshape(batch_size, seq_len, -1, 2)
         
-        # Remove extra dimension if out_dim is 1
         if x.shape[2] == 1:
-            x = x.squeeze(2)  # [B, seq_len, 2]
-                
-        print(f"After linear stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}")
+            x = x.squeeze(2)
         
-        # Define target range
-        target_min = -4.0
-        target_max = 4.0
-        target_range = target_max - target_min
+        # Final scaling to target range
+        x = torch.tanh(x/4.0) * 4.0  # Smooth scaling to [-4, 4]
         
-        # Use a safe normalization approach
-        x_std = torch.std(x)
-        if x_std < 1e-8:  # If std is too small
-            x_std = torch.ones_like(x_std)
-            
-        x_mean = torch.mean(x)
-        x = (x - x_mean) / (x_std + 1e-8)
-        
-        # Scale to target range using tanh
-        x = torch.tanh(x) * (target_range/2.0)  # tanh output is [-1, 1], so multiply by half the range
-        # Center at target midpoint
-        x = x + (target_max + target_min)/2.0
-        
-        print(f"Final output stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}, mean: {x.mean().item():.4f}, std: {x.std().item():.4f}")
-        print(f"Output shape: {x.shape}")
-        
-        # Add final sanity check
-        if not torch.isfinite(x).all():
-            print("WARNING: Non-finite values in output!")
-            # Replace NaN/inf with finite values
-            x = torch.nan_to_num(x, nan=0.0, posinf=target_max, neginf=target_min)
+        value_logger.debug(f"Final output stats - min: {x.min().item():.4f}, max: {x.max().item():.4f}, mean: {x.mean().item():.4f}, std: {x.std().item():.4f}")
+        shape_logger.debug(f"Output shape: {x.shape}")
             
         return x
 
@@ -341,20 +332,20 @@ class tfdiff_ModRec(nn.Module):
         )
 
     def forward(self, x, t, c):
-        print("\n=== Model Forward Pass Start ===")
-        print(f"Input x shape: {x.shape}")
+        shape_logger.debug("\n=== Model Forward Pass Start ===")
+        shape_logger.debug(f"Input x shape: {x.shape}")
         
         # Embed positions
         x = self.p_embed(x)
-        print(f"After position embedding: {x.shape}")
+        shape_logger.debug(f"After position embedding: {x.shape}")
         
         # Embed diffusion timestep
         t = self.t_embed(t)
-        print(f"Timestep embedding: {t.shape}")
+        shape_logger.debug(f"Timestep embedding: {t.shape}")
         
         # Embed conditioning info
         c = self.c_embed(c)
-        print(f"Condition embedding: {c.shape}")
+        shape_logger.debug(f"Condition embedding: {c.shape}")
         
         # Combine condition with diffusion step
         c = c + t
@@ -371,5 +362,5 @@ class tfdiff_ModRec(nn.Module):
         if len(x.shape) == 4 and x.shape[2] == 1:
             x = x.squeeze(2)
             
-        print(f"Model output shape: {x.shape}")
+        shape_logger.debug(f"Model output shape: {x.shape}")
         return x

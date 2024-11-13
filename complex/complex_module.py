@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-
+from tfdiff.debug_utils import shape_logger, value_logger
 import numpy as np
 import math
 
@@ -306,8 +306,8 @@ class ComplexDotProductAttention(nn.Module):
         self.chunk_size = chunk_size
 
     def forward(self, queries, keys, values):
-        print(f"\n=== DotProductAttention Input Shapes ===")
-        print(f"Q:{queries.shape}, K:{keys.shape}, V:{values.shape}")
+        shape_logger.debug(f"\n=== DotProductAttention Input Shapes ===")
+        shape_logger.debug(f"Q:{queries.shape}, K:{keys.shape}, V:{values.shape}")
         
         batch_size, seq_len, feature_dim = queries.shape[:-1]
         
